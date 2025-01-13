@@ -1,0 +1,19 @@
+[project]
+name = "image-stitcher"
+version = "0.1.0"
+description = "Stitch together 5D images into OME-zarr files."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14.1",
+    "ruff>=0.9.1",
+]
+
+[tool.mypy]
+disallow_untyped_defs = true
+strict_optional = true
+implicit_optional = false
+warn_return_any = true
