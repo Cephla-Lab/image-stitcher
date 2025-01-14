@@ -1,5 +1,6 @@
 import enum
 import json
+import logging
 import math
 import os
 import pathlib
@@ -296,7 +297,7 @@ class StitchingComputedParameters:
         obj_focal_length_mm = obj_tube_lens_mm / obj_mag
         actual_mag = tube_lens_mm / obj_focal_length_mm
         self.pixel_size_um = sensor_pixel_size_um / actual_mag
-        print("pixel_size_um:", self.pixel_size_um)
+        logging.info(f"pixel_size_um: {self.pixel_size_um}")
 
     def parse_acquisition_metadata(self) -> None:
         """Parse image filenames and matche them to coordinates for stitching.
@@ -318,12 +319,14 @@ class StitchingComputedParameters:
             image_folder = input_path / str(timepoint)
             coordinates_path = image_folder / "coordinates.csv"
 
-            print(f"Processing timepoint {timepoint}, image folder: {image_folder}")
+            logging.info(
+                f"Processing timepoint {timepoint}, image folder: {image_folder}"
+            )
 
             try:
                 coordinates_df = pd.read_csv(coordinates_path)
             except FileNotFoundError:
-                print(f"Warning: coordinates.csv not found for timepoint {timepoint}")
+                logging.warning(f"coordinates.csv not found for timepoint {timepoint}")
                 continue
 
             # Process each image file
@@ -353,7 +356,7 @@ class StitchingComputedParameters:
                 ]
 
                 if coord_rows.empty:
-                    print(f"Warning: No coordinates for {file}")
+                    logging.warning(f"No coordinates for {file}")
                     continue
 
                 coord_row = coord_rows.iloc[0]
@@ -433,12 +436,12 @@ class StitchingComputedParameters:
         ]
 
         # Print out information about the dataset
-        print(f"Regions: {self.regions}, Channels: {self.channel_names}")
-        print(f"FOV dimensions: {self.input_height}x{self.input_width}")
-        print(f"{self.num_z} Z levels, {self.num_t} Time points")
-        print(f"{self.num_c} Channels: {self.monochrome_channels}")
-        print(f"{len(self.regions)} Regions: {self.regions}")
-        print(f"Number of FOVs per region: {self.num_fovs_per_region}")
+        logging.info(f"Regions: {self.regions}, Channels: {self.channel_names}")
+        logging.info(f"FOV dimensions: {self.input_height}x{self.input_width}")
+        logging.info(f"{self.num_z} Z levels, {self.num_t} Time points")
+        logging.info(f"{self.num_c} Channels: {self.monochrome_channels}")
+        logging.info(f"{len(self.regions)} Regions: {self.regions}")
+        logging.info(f"Number of FOVs per region: {self.num_fovs_per_region}")
 
     @staticmethod
     def get_channel_color(channel_name: str) -> int:
@@ -473,8 +476,8 @@ class StitchingComputedParameters:
         if not metadata:
             available_t = sorted(set(k[0] for k in self.acquisition_metadata.keys()))
             available_r = sorted(set(k[1] for k in self.acquisition_metadata.keys()))
-            print(f"\nAvailable timepoints in data: {available_t}")
-            print(f"Available regions in data: {available_r}")
+            logging.info(f"\nAvailable timepoints in data: {available_t}")
+            logging.info(f"Available regions in data: {available_r}")
             raise ValueError(f"No data found for timepoint {t}, region {region}")
 
         return metadata

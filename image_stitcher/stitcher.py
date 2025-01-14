@@ -940,7 +940,7 @@ class Stitcher:
             timepoint = int(timepoint)
 
             ttime = time.time()
-            logging.info(f"\nProcessing timepoint {timepoint}")
+            logging.info(f"Processing timepoint {timepoint}")
 
             # Create timepoint output directory
             t_output_dir = self.paths.per_timepoint_dir(timepoint)
