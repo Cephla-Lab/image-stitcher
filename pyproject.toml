@@ -7,13 +7,22 @@ requires-python = ">=3.12"
 dependencies = [
     "aicsimageio>=4.14.0",
     "dask-image>=2024.5.3",
-    "numpy>=2.2.1",
+    "numpy>=2.0.0",
     "ome-zarr>=0.10.3",
     "pandas>=2.2.3",
     "pydantic>=2.10.5",
     "pydantic-core>=2.27.2",
     "pydantic-settings>=2.7.1",
 ]
+
+[project.optional-dependencies]
+gui = [
+    "napari-ome-zarr>=0.6.1",
+    "napari[all]>=0.5.5",
+    "qtpy>=2.4.2",
+    "setuptools>=75.8.0",
+]
+
 
 [dependency-groups]
 dev = [
@@ -38,4 +47,8 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["zarr.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["napari.*"]
 ignore_missing_imports = true

@@ -86,10 +86,13 @@ class Stitcher:
         self.params = params
         self.callbacks = callbacks
         self.computed_parameters = StitchingComputedParameters(self.params)
+        self._paths: Paths | None = None
 
     @property
     def paths(self) -> Paths:
-        return Paths(self.params.stitched_folder, self.params.output_format)
+        if self._paths is None:
+            self._paths = Paths(self.params.stitched_folder, self.params.output_format)
+        return self._paths
 
     def create_output_array(self, timepoint: int, region: str) -> da.Array:
         width, height = self.computed_parameters.calculate_output_dimensions(
