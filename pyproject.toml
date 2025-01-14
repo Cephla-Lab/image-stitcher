@@ -12,6 +12,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "mypy>=1.14.1",
+    "pandas-stubs>=2.2.3.241126",
     "ruff>=0.9.1",
 ]
 
@@ -20,3 +21,7 @@ disallow_untyped_defs = true
 strict_optional = true
 implicit_optional = false
 warn_return_any = true
+
+[[tool.mypy.overrides]]
+module = ["dask_image.*"]
+ignore_missing_imports = true

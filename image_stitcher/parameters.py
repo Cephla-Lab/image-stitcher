@@ -1,9 +1,18 @@
 import enum
+import json
+import math
 import os
+import pathlib
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any, ClassVar, NamedTuple, assert_never
 
+import numpy as np
+import pandas as pd
+from dask_image.imread import imread as dask_imread
 from pydantic import AfterValidator, BaseModel
+
+DATETIME_FORMAT = "%Y-%m-%d_%H-%M-%S.%f"
 
 
 class OutputFormat(enum.Enum):
@@ -68,9 +77,7 @@ class StitchingParameters(BaseModel):
     def stitched_folder(self) -> str:
         """Path to folder containing stitched outputs."""
         return os.path.join(
-            self.input_folder
-            + "_stitched_"
-            + datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")
+            self.input_folder + "_stitched_" + datetime.now().strftime(DATETIME_FORMAT)
         )
 
     @classmethod
@@ -94,3 +101,444 @@ class StitchingParameters(BaseModel):
         """
         with open(json_path, "w") as f:
             f.write(self.model_dump_json(indent=2))
+
+
+@dataclass
+class UnidirectionalScanPatternParams:
+    """Computed parameters for a unidirectional scan pattern."""
+
+    h_shift: tuple[int, int] = (0, 0)
+    v_shift: tuple[int, int] = (0, 0)
+
+
+class ReverseRows(enum.Enum):
+    """Whether an S-pattern reverses even or odd rows."""
+
+    even = "even"
+    odd = "odd"
+
+
+@dataclass
+class SPatternScanParams:
+    """Computed parameters for an S-pattern scan pattern."""
+
+    h_shift: tuple[int, int] = (0, 0)
+    v_shift: tuple[int, int] = (0, 0)
+    h_shift_rev: tuple[int, int] = (0, 0)
+    h_shift_rev_rows: ReverseRows = ReverseRows.even
+
+
+ScanParams = UnidirectionalScanPatternParams | SPatternScanParams
+
+
+def default_scan_params(pattern: ScanPattern) -> ScanParams:
+    match pattern:
+        case ScanPattern.unidirectional:
+            return UnidirectionalScanPatternParams()
+        case ScanPattern.s_pattern:
+            return SPatternScanParams()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+class MetaKey(NamedTuple):
+    """A (timepoint, region, fov_idx, z_level, channel) key."""
+
+    t: int
+    region: str
+    fov: int
+    z_level: int
+    channel: str
+
+
+@dataclass
+class AcquisitionMetadata:
+    filepath: pathlib.Path
+    """Path to the image file."""
+    x: float
+    """X position of the stage in mm."""
+    y: float
+    """Y position of the stage in mm."""
+    z: float
+    """Z position of the stage in µm."""
+    channel: str
+    """The name of the channel."""
+    z_level: int
+    """The z-index of the current plane when z-sectioning a single field of view."""
+    region: str
+    fov_idx: int
+    """The index of the current field of view."""
+    t: int
+    """The current timepoint."""
+
+    @property
+    def key(self) -> MetaKey:
+        """A (timepoint, region, fov_idx, z_level, channel) key.
+
+        This uniquely identifies this image within an acquisition.
+        """
+        return MetaKey(self.t, self.region, self.fov_idx, self.z_level, self.channel)
+
+
+class ImagePlaneDims(NamedTuple):
+    width_px: int
+    height_px: int
+
+
+@dataclass
+class StitchingComputedParameters:
+    """Parameters computed from other parameters, images, or files on disk.
+
+    TODO(colin): refactor to remove all the defaults that end up never used.
+    """
+
+    CHUNK_SIZE_LIMIT_PX: ClassVar[int] = (
+        12288  # 12288 = 8192 + 4096, just arbitrarily chosen multiples of 1024
+    )
+    """An upper bound on the size of a dask array chunk.
+    
+    We assume many chunks can fit into memory at once, and for a single square
+    plane in float64, this works out to about 1GB/chunk.
+    """
+    parent: StitchingParameters
+    scan_params: ScanParams = field(init=False)
+    pixel_size_um: int = field(init=False)
+    pixel_binning: int = field(init=False)
+    num_z: int = field(init=False)
+    num_c: int = field(init=False)
+    num_t: int = field(init=False)
+    input_height: int = field(init=False)
+    input_width: int = field(init=False)
+    num_pyramid_levels: int = field(init=False)
+    acquisition_params: dict[str, Any] = field(init=False)
+    timepoints: list[int] = field(init=False)
+    monochrome_channels: list[str] = field(init=False)
+    monochrome_colors: list[int] = field(init=False)
+    # TODO(colin): fill in correct type when importing the flatfield code.
+    flatfields: dict[None, None] = field(init=False)
+    acquisition_metadata: dict[MetaKey, AcquisitionMetadata] = field(init=False)
+    dtype: np.dtype = field(init=False)
+    chunks: tuple[int, int, int, int, int] = field(init=False)
+    xy_positions: list[tuple[float, float]] = field(init=False)
+    regions: list[str] = field(default_factory=list)
+    channel_names: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.scan_params = default_scan_params(self.parent.scan_pattern)
+        self.init_timepoints()
+        self.init_acquisition_parameters()
+        self.init_pixel_size()
+        self.parse_acquisition_metadata()
+
+    def init_timepoints(self) -> None:
+        self.timepoints = [
+            int(d, 10)
+            for d in os.listdir(self.parent.input_folder)
+            if os.path.isdir(os.path.join(self.parent.input_folder, d)) and d.isdigit()
+        ]
+        self.timepoints.sort()
+
+    def init_acquisition_parameters(self) -> None:
+        acquistion_params_path = os.path.join(
+            self.parent.input_folder, "acquisition parameters.json"
+        )
+        with open(acquistion_params_path, "r") as file:
+            self.acquisition_params = json.load(file)
+
+    def init_pixel_size(self) -> None:
+        """Initialize the pixel size parameters.
+
+        This must be called after init_acquisition_params
+
+        TODO(colin): refactor so that there are not implicit dependencies
+        between these initialization functions.
+        """
+        obj_mag = self.acquisition_params["objective"]["magnification"]
+        obj_tube_lens_mm = self.acquisition_params["objective"]["tube_lens_f_mm"]
+        sensor_pixel_size_um = self.acquisition_params["sensor_pixel_size_um"]
+        tube_lens_mm = self.acquisition_params["tube_lens_mm"]
+        self.pixel_binning = self.acquisition_params.get("pixel_binning", 1)
+        assert isinstance(self.pixel_binning, int)
+        obj_focal_length_mm = obj_tube_lens_mm / obj_mag
+        actual_mag = tube_lens_mm / obj_focal_length_mm
+        self.pixel_size_um = sensor_pixel_size_um / actual_mag
+        print("pixel_size_um:", self.pixel_size_um)
+
+    def parse_acquisition_metadata(self) -> None:
+        """Parse image filenames and matche them to coordinates for stitching.
+
+        multiple channels, regions, timepoints, z levels
+
+        Must be called after self.init_timepoints().
+
+        TODO(colin): refactor so that there are not implicit dependencies
+        between these initialization functions.
+        """
+        input_path = pathlib.Path(self.parent.input_folder)
+        self.acquisition_metadata = {}
+        max_z = 0
+        max_fov = 0
+
+        # Iterate over each timepoint
+        for timepoint in self.timepoints:
+            image_folder = input_path / str(timepoint)
+            coordinates_path = image_folder / "coordinates.csv"
+
+            print(f"Processing timepoint {timepoint}, image folder: {image_folder}")
+
+            try:
+                coordinates_df = pd.read_csv(coordinates_path)
+            except FileNotFoundError:
+                print(f"Warning: coordinates.csv not found for timepoint {timepoint}")
+                continue
+
+            # Process each image file
+            image_files = sorted(
+                [
+                    f.resolve()
+                    for f in image_folder.iterdir()
+                    if f.suffix in (".bmp", ".tiff", ".tif", ".jpg", ".jpeg", ".png")
+                    and "focus_camera" not in f.name
+                ]
+            )
+
+            for file in image_files:
+                parts = file.name.split("_", 3)
+                region, fov, z_level, channel = (
+                    parts[0],
+                    int(parts[1]),
+                    int(parts[2]),
+                    os.path.splitext(parts[3])[0],
+                )
+                channel = channel.replace("_", " ").replace("full ", "full_")
+
+                coord_rows = coordinates_df[
+                    (coordinates_df["region"] == region)
+                    & (coordinates_df["fov"] == fov)
+                    & (coordinates_df["z_level"] == z_level)
+                ]
+
+                if coord_rows.empty:
+                    print(f"Warning: No coordinates for {file}")
+                    continue
+
+                coord_row = coord_rows.iloc[0]
+
+                meta = AcquisitionMetadata(
+                    filepath=file,
+                    x=coord_row["x (mm)"],
+                    y=coord_row["y (mm)"],
+                    z=coord_row["z (um)"],
+                    channel=channel,
+                    z_level=z_level,
+                    region=region,
+                    fov_idx=fov,
+                    t=timepoint,
+                )
+
+                self.acquisition_metadata[meta.key] = meta
+
+                # Add region and channel names to the sets
+                self.regions.append(region)
+                self.channel_names.append(channel)
+
+                # Update max_z and max_fov values
+                max_z = max(max_z, z_level)
+                max_fov = max(max_fov, fov)
+
+        # After processing all timepoints, finalize the list of regions and channels
+        self.regions = sorted(set(self.regions))
+        self.channel_names = sorted(set(self.channel_names))
+
+        # Calculate number of timepoints (t), Z levels, and FOVs per region
+        self.num_t = len(self.timepoints)
+        self.num_z = max_z + 1
+        self.num_fovs_per_region = max_fov + 1
+
+        # Set up image parameters based on the first image
+        first_meta = list(self.acquisition_metadata.values())[0]
+        first_image = dask_imread(first_meta.filepath)[0]
+
+        self.dtype = first_image.dtype
+        if len(first_image.shape) == 2:
+            self.input_height, self.input_width = first_image.shape
+        elif len(first_image.shape) == 3:
+            self.input_height, self.input_width = first_image.shape[:2]
+        else:
+            raise ValueError(f"Unexpected image shape: {first_image.shape}")
+        # TODO(colin): further tune the chunk size. Empirically, increasing from
+        # 512x512 to the image size was a huge (25x or more in some cases)
+        # speedup. Is even bigger better?
+        self.chunks = (
+            1,
+            1,
+            1,
+            min(self.input_height, self.CHUNK_SIZE_LIMIT_PX),
+            min(self.input_width, self.CHUNK_SIZE_LIMIT_PX),
+        )
+
+        # Set up final monochrome channels
+        self.monochrome_channels = []
+        for channel in self.channel_names:
+            (t, region, fov, z_level, _) = first_meta.key
+            channel_key = MetaKey(t, region, fov, z_level, channel)
+            channel_image = dask_imread(
+                self.acquisition_metadata[channel_key].filepath
+            )[0]
+            if len(channel_image.shape) == 3 and channel_image.shape[2] == 3:
+                channel = channel.split("_")[0]
+                self.monochrome_channels.extend(
+                    [f"{channel}_R", f"{channel}_G", f"{channel}_B"]
+                )
+            else:
+                self.monochrome_channels.append(channel)
+
+        self.num_c = len(self.monochrome_channels)
+        self.monochrome_colors = [
+            self.get_channel_color(name) for name in self.monochrome_channels
+        ]
+
+        # Print out information about the dataset
+        print(f"Regions: {self.regions}, Channels: {self.channel_names}")
+        print(f"FOV dimensions: {self.input_height}x{self.input_width}")
+        print(f"{self.num_z} Z levels, {self.num_t} Time points")
+        print(f"{self.num_c} Channels: {self.monochrome_channels}")
+        print(f"{len(self.regions)} Regions: {self.regions}")
+        print(f"Number of FOVs per region: {self.num_fovs_per_region}")
+
+    @staticmethod
+    def get_channel_color(channel_name: str) -> int:
+        """Compute the color for display of a given channel name."""
+        color_map = {
+            "405": 0x0000FF,  # Blue
+            "488": 0x00FF00,  # Green
+            "561": 0xFFCF00,  # Yellow
+            "638": 0xFF0000,  # Red
+            "730": 0x770000,  # Dark Red"
+            "_B": 0x0000FF,  # Blue
+            "_G": 0x00FF00,  # Green
+            "_R": 0xFF0000,  # Red
+        }
+        for key, value in color_map.items():
+            if key in channel_name:
+                return value
+        return 0xFFFFFF  # Default to white if no match found
+
+    def get_region_metadata(
+        self, t: int, region: str
+    ) -> dict[MetaKey, AcquisitionMetadata]:
+        """Helper method to get region metadata with consistent filtering."""
+
+        # Filter data with explicit type matching
+        metadata = {
+            key: value
+            for key, value in self.acquisition_metadata.items()
+            if key.t == t and key.region == region
+        }
+
+        if not metadata:
+            available_t = sorted(set(k[0] for k in self.acquisition_metadata.keys()))
+            available_r = sorted(set(k[1] for k in self.acquisition_metadata.keys()))
+            print(f"\nAvailable timepoints in data: {available_t}")
+            print(f"Available regions in data: {available_r}")
+            raise ValueError(f"No data found for timepoint {t}, region {region}")
+
+        return metadata
+
+    def calculate_output_dimensions(
+        self, timepoint: int, region: str
+    ) -> ImagePlaneDims:
+        """Calculate dimensions for the output image.
+
+        Args:
+            timepoint: The timepoint to process
+            region: The region identifier
+
+        TODO(colin): it's weird that this depends on a timepoint and region yet
+        sets global properties of `self`. Refactor to avoid this?
+
+        Returns:
+            tuple: (width_pixels, height_pixels)
+        """
+        region_data = self.get_region_metadata(timepoint, region)
+        # Extract positions
+        self.xy_positions = sorted(
+            (tile_info.x, tile_info.y) for tile_info in region_data.values()
+        )
+        x_positions = sorted(set(x for (x, _) in self.xy_positions))
+        y_positions = sorted(set(y for (_, y) in self.xy_positions))
+
+        if self.parent.use_registration:
+            # Calculate dimensions with registration shifts
+            num_cols = len(x_positions)
+            num_rows = len(y_positions)
+
+            # Handle different scanning patterns
+            if isinstance(self.scan_params, SPatternScanParams):
+                max_h_shift = (
+                    max(
+                        abs(self.scan_params.h_shift[0]),
+                        abs(self.scan_params.h_shift_rev[0]),
+                    ),
+                    max(
+                        abs(self.scan_params.h_shift[1]),
+                        abs(self.scan_params.h_shift_rev[1]),
+                    ),
+                )
+            else:
+                max_h_shift = (
+                    abs(self.scan_params.h_shift[0]),
+                    abs(self.scan_params.h_shift[1]),
+                )
+
+            # Calculate dimensions including overlaps and shifts
+            width_pixels = int(
+                self.input_width
+                + ((num_cols - 1) * (self.input_width - max_h_shift[1]))
+            )
+            width_pixels += abs(
+                (num_rows - 1) * self.scan_params.v_shift[1]
+            )  # Add horizontal shift from vertical registration
+
+            height_pixels = int(
+                self.input_height
+                + ((num_rows - 1) * (self.input_height - self.scan_params.v_shift[0]))
+            )
+            height_pixels += abs(
+                (num_cols - 1) * max_h_shift[0]
+            )  # Add vertical shift from horizontal registration
+
+        else:
+            # Calculate dimensions based on physical coordinates
+            width_mm = (
+                max(x_positions)
+                - min(x_positions)
+                + (self.input_width * self.pixel_size_um / 1000)
+            )
+            height_mm = (
+                max(y_positions)
+                - min(y_positions)
+                + (self.input_height * self.pixel_size_um / 1000)
+            )
+
+            width_pixels = int(np.ceil(width_mm * 1000 / self.pixel_size_um))
+            height_pixels = int(np.ceil(height_mm * 1000 / self.pixel_size_um))
+
+        # Calculate pyramid levels based on dimensions and number of regions
+        if len(self.regions) > 1:
+            rows, columns = self.get_rows_and_columns()
+            max_dimension = max(len(rows), len(columns))
+        else:
+            max_dimension = 1
+
+        self.num_pyramid_levels = max(
+            1,
+            math.ceil(np.log2(max(width_pixels, height_pixels) / 1024 * max_dimension)),
+        )
+
+        return ImagePlaneDims(width_px=width_pixels, height_px=height_pixels)
+
+    def get_rows_and_columns(self) -> tuple[list[str], list[str]]:
+        rows = sorted(set(region[0] for region in self.regions))
+        columns = sorted(set(region[1:] for region in self.regions))
+        return rows, columns
