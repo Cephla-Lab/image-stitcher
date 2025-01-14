@@ -1,3 +1,4 @@
+import logging
 import sys
 from typing import Any, cast
 
@@ -364,7 +365,7 @@ class StitchingGUI(QWidget):
             napari.run()
         except Exception as e:
             QMessageBox.critical(self, "Error Opening in Napari", str(e))
-            print(f"An error occurred while opening output in Napari: {e}")
+            logging.error(f"An error occurred while opening output in Napari: {e}")
 
     def extractWavelength(self, name: str) -> str | None:
         # Split the string and find the wavelength number immediately after "Fluorescence"
@@ -390,6 +391,7 @@ class StitchingGUI(QWidget):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     app = QApplication(sys.argv)
     gui = StitchingGUI()
     gui.show()

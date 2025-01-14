@@ -1,3 +1,4 @@
+import logging
 import os
 import pathlib
 import time
@@ -106,7 +107,7 @@ class Stitcher:
             height,
             width,
         )
-        print(
+        logging.debug(
             f"region {region} timepoint {timepoint} output array dimensions: {output_shape}"
         )
         return cast(
@@ -134,10 +135,10 @@ class Stitcher:
                 try:
                     return cast(da.Array, dask_imread(value.filepath)[0])
                 except FileNotFoundError:
-                    print(f"Warning: Tile file not found: {value.filepath}")
+                    logging.warning(f"Warning: Tile file not found: {value.filepath}")
                     return None
 
-        print(
+        logging.warning(
             f"Warning: No matching tile found for region {region}, x={x}, y={y}, channel={channel}, z={z_level}"
         )
         return None
@@ -222,14 +223,14 @@ class Stitcher:
                 tile_slice
             )
         except Exception as e:
-            print(f"ERROR: Failed to place tile. Details: {str(e)}")
-            print(
-                f"DEBUG: t:0, channel_idx:{channel_idx}, z_level:{z_level}, y:{y_pixel}-{y_end}, x:{x_pixel}-{x_end}"
+            logging.error(f"Failed to place tile. Details: {str(e)}")
+            logging.debug(
+                f"t:0, channel_idx:{channel_idx}, z_level:{z_level}, y:{y_pixel}-{y_end}, x:{x_pixel}-{x_end}"
             )
-            print(f"DEBUG: tile slice shape: {tile_slice.shape}")
-            print(f"DEBUG: stitched_region shape: {stitched_region.shape}")
-            print(
-                f"DEBUG: output location shape: {stitched_region[0, channel_idx, z_level, y_pixel:y_end, x_pixel:x_end].shape}"
+            logging.debug(f"tile slice shape: {tile_slice.shape}")
+            logging.debug(f"stitched_region shape: {stitched_region.shape}")
+            logging.debug(
+                f"output location shape: {stitched_region[0, channel_idx, z_level, y_pixel:y_end, x_pixel:x_end].shape}"
             )
             raise
 
@@ -245,7 +246,7 @@ class Stitcher:
         y_min = min(self.computed_parameters.y_positions)
         total_tiles = len(region_metadata)
         processed_tiles = 0
-        print(
+        logging.info(
             f"Beginning stitching of {total_tiles} tiles for region {region} timepoint {timepoint}"
         )
 
@@ -317,7 +318,7 @@ class Stitcher:
             self.callbacks.update_progress(processed_tiles, total_tiles)
             processed_tiles += 1
 
-        print(
+        logging.info(
             f"Time to stitch region {region} timepoint {t}: {time.time() - start_time}"
         )
         return stitched_region
@@ -345,7 +346,7 @@ class Stitcher:
         ]
 
         if self.params.output_format == OutputFormat.ome_zarr:
-            print(f"Writing OME-ZARR to: {output_path}")
+            logging.info(f"Writing OME-ZARR to: {output_path}")
             writer = OmeZarrWriter(output_path)
 
             # Build OME metadata for Zarr
@@ -372,7 +373,7 @@ class Stitcher:
 
         else:
             assert self.params.output_format == OutputFormat.ome_tiff
-            print(f"Writing OME-TIFF to: {output_path}")
+            logging.info(f"Writing OME-TIFF to: {output_path}")
 
             # Build OME metadata for TIFF
             ome_meta = OmeTiffWriter.build_ome(
@@ -396,8 +397,8 @@ class Stitcher:
                 channel_colors=rgb_colors,
             )
 
-        print(f"Successfully saved to: {output_path}")
-        print(
+        logging.info(f"Successfully saved to: {output_path}")
+        logging.info(
             f"Time to save region {region} timepoint {timepoint}: {time.time() - start_time}"
         )
         return output_path
@@ -420,7 +421,7 @@ class Stitcher:
         start_time = time.time()
         output_path = self.paths.per_timepoint_region_output(timepoint, region)
         output_path.parent.mkdir(exist_ok=True, parents=True)
-        print(f"Writing OME-ZARR to: {output_path}")
+        logging.info(f"Writing OME-ZARR to: {output_path}")
 
         # Create zarr store and root group
         store = ome_zarr.io.parse_url(output_path, mode="w").store
@@ -509,8 +510,8 @@ class Stitcher:
                 )
             ],
         }
-        print(f"Successfully saved OME-ZARR to: {output_path}")
-        print(
+        logging.info(f"Successfully saved OME-ZARR to: {output_path}")
+        logging.info(
             f"Time to save region {region} timepoint {timepoint}: {time.time() - start_time}"
         )
         return output_path
@@ -581,7 +582,7 @@ class Stitcher:
                 merged_data, self.computed_parameters.num_pyramid_levels
             )
             storage_options = {"chunks": self.computed_parameters.chunks}
-            print(f"Writing time series for region {region}")
+            logging.info(f"Writing time series for region {region}")
             ome_zarr.writer.write_multiscale(
                 pyramid=pyramid,
                 group=region_group,
@@ -622,7 +623,7 @@ class Stitcher:
 
         for t in self.computed_parameters.timepoints:
             zarr_path = self.paths.per_timepoint_region_output(t, region)
-            print(f"Loading t:{t} region:{region}, path:{zarr_path}")
+            logging.info(f"Loading t:{t} region:{region}, path:{zarr_path}")
 
             try:
                 z = zarr.open(zarr_path, mode="r")
@@ -633,7 +634,7 @@ class Stitcher:
                 t_data.append(t_array)
                 t_shapes.append(t_array.shape)
             except Exception as e:
-                print(f"Error loading timepoint {t}, region {region}: {e}")
+                logging.error(f"Error loading timepoint {t}, region {region}: {e}")
                 continue
 
         if not t_data:
@@ -647,7 +648,9 @@ class Stitcher:
         max_shape = tuple(max(s) for s in zip(*t_shapes))
         padded_data = [self.pad_to_largest(t, max_shape) for t in t_data]
         merged_data = cast(da.Array, da.concatenate(padded_data, axis=0))
-        print(f"Merged timepoints shape for region {region}: {merged_data.shape}")
+        logging.debug(
+            f"Merged timepoints shape for region {region}: {merged_data.shape}"
+        )
         return merged_data
 
     def pad_to_largest(
@@ -700,7 +703,9 @@ class Stitcher:
                 region_path = self.paths.per_timepoint_region_output(t, region)
 
                 if not os.path.exists(region_path):
-                    print(f"Warning: Missing data for timepoint {t}, region {region}")
+                    logging.warning(
+                        f"Warning: Missing data for timepoint {t}, region {region}"
+                    )
                     continue
 
                 # Load data from existing zarr
@@ -935,7 +940,7 @@ class Stitcher:
             timepoint = int(timepoint)
 
             ttime = time.time()
-            print(f"\nProcessing timepoint {timepoint}")
+            logging.info(f"\nProcessing timepoint {timepoint}")
 
             # Create timepoint output directory
             t_output_dir = self.paths.per_timepoint_dir(timepoint)
@@ -943,7 +948,7 @@ class Stitcher:
 
             for region in self.computed_parameters.regions:
                 rtime = time.time()
-                print(f"Processing region {region}...")
+                logging.info(f"Processing region {region}...")
 
                 # Stitch region
                 self.callbacks.starting_stitching()
@@ -961,24 +966,24 @@ class Stitcher:
                         timepoint, region, stitched_region
                     )
 
-                print(
+                logging.info(
                     f"Completed region {region} (saved to {output_path}): {time.time() - rtime}"
                 )
 
-            print(f"Completed timepoint {timepoint}: {time.time() - ttime}")
+            logging.info(f"Completed timepoint {timepoint}: {time.time() - ttime}")
 
         # Post-processing based on merge settings
         post_time = time.time()
         self.callbacks.starting_saving(True)
 
         if self.params.merge_timepoints and self.params.merge_hcs_regions:
-            print("Creating complete HCS OME-ZARR with merged timepoints...")
+            logging.info("Creating complete HCS OME-ZARR with merged timepoints...")
             self.create_complete_hcs_ome_zarr()
         elif self.params.merge_timepoints:
-            print("Creating merged timepoints OME-ZARR...")
+            logging.info("Creating merged timepoints OME-ZARR...")
             self.merge_timepoints_per_region()
         elif self.params.merge_hcs_regions:
-            print("Creating HCS OME-ZARR per timepoint...")
+            logging.info("Creating HCS OME-ZARR per timepoint...")
             self.create_hcs_ome_zarr_per_timepoint()
         else:
             # Emit finished signal with the last saved path
@@ -990,5 +995,5 @@ class Stitcher:
                 str(final_path), self.computed_parameters.dtype
             )
 
-        print(f"Post-processing time: {time.time() - post_time}")
-        print(f"Total processing time: {time.time() - stime}")
+        logging.info(f"Post-processing time: {time.time() - post_time}")
+        logging.info(f"Total processing time: {time.time() - stime}")

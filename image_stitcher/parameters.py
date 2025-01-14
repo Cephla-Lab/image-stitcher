@@ -90,6 +90,9 @@ class StitchingParameters(
     merge_hcs_regions: bool = False
     """Merge HCS regions (wells) to create full wellplate HCS output."""
 
+    verbose: bool = False
+    """Show debug-level logging."""
+
     def __post_init__(self) -> None:
         """Validate and process parameters after initialization."""
         # Convert relative path to absolute
