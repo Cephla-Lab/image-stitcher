@@ -56,6 +56,7 @@ def temporary_image_directory_params(
     n_cols: int,
     im_size: ImagePlaneDims,
     channel_names: list[str],
+    name: str = "image_inputs",
 ) -> Generator[StitchingComputedParameters, None, None]:
     """Set up the files that the computed parameters requires for setup.
 
@@ -67,7 +68,7 @@ def temporary_image_directory_params(
         - the acquisition params file
     """
     with tempfile.TemporaryDirectory(delete=True) as d:
-        base_dir = pathlib.Path(d)
+        base_dir = pathlib.Path(d) / name
         os.makedirs(base_dir / "0", exist_ok=True)
         coords_file = base_dir / "0" / "coordinates.csv"
         acq_params_file = base_dir / "acquisition parameters.json"

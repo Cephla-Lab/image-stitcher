@@ -5,11 +5,14 @@ description = "Stitch together 5D images into OME-zarr files."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aicsimageio>=4.14.0",
     "dask-image>=2024.5.3",
     "numpy>=2.2.1",
+    "ome-zarr>=0.10.3",
     "pandas>=2.2.3",
     "pydantic>=2.10.5",
     "pydantic-core>=2.27.2",
+    "pydantic-settings>=2.7.1",
 ]
 
 [dependency-groups]
@@ -27,4 +30,12 @@ warn_return_any = true
 
 [[tool.mypy.overrides]]
 module = ["dask_image.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["ome_zarr.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["zarr.*"]
 ignore_missing_imports = true

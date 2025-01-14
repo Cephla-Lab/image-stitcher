@@ -10,7 +10,8 @@ from typing import Annotated, Any, ClassVar, NamedTuple, assert_never
 import numpy as np
 import pandas as pd
 from dask_image.imread import imread as dask_imread
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator
+from pydantic_settings import BaseSettings
 
 DATETIME_FORMAT = "%Y-%m-%d_%H-%M-%S.%f"
 
@@ -41,7 +42,12 @@ def z_non_negative(num: int) -> int:
     return num
 
 
-class StitchingParameters(BaseModel):
+class StitchingParameters(
+    BaseSettings,
+    cli_parse_args=True,
+    cli_prog_name="image_stitcher",
+    use_attribute_docstrings=True,
+):
     """Parameters for microscopy image stitching operations."""
 
     input_folder: Annotated[str, AfterValidator(input_path_exists)]
@@ -51,7 +57,8 @@ class StitchingParameters(BaseModel):
     """
 
     # Output configuration
-    output_format: OutputFormat
+    output_format: OutputFormat = OutputFormat.ome_zarr
+    """Output format for the stitched data."""
 
     # Image processing options
     apply_flatfield: bool = False
@@ -59,14 +66,29 @@ class StitchingParameters(BaseModel):
 
     # Registration options
     use_registration: bool = False
-    registration_channel: str | None = None  # Will use first available channel if None
+    """Whether to register the images using their content, rather than based on x/y stage positions."""
+    registration_channel: str | None = None
+    """Channel name to use for registration. None -> first available channel."""
     registration_z_level: Annotated[int, AfterValidator(z_non_negative)] = 0
+    """Z level to use for registration."""
     dynamic_registration: bool = False
+    """Use dynamic registration for improved accuracy.
+
+    TODO(colin): describe what this actually does and when you would want to use it or not.
+    """
 
     # Scanning and stitching configuration
     scan_pattern: ScanPattern = ScanPattern.unidirectional
+    """The scan pattern used for the acquisition.
+
+    unidirectional means all rows go the same direction; S-pattern indicates every
+    other row goes the other direction.
+    """
     merge_timepoints: bool = False
+    """Merge timepoints to create time series output."""
+
     merge_hcs_regions: bool = False
+    """Merge HCS regions (wells) to create full wellplate HCS output."""
 
     def __post_init__(self) -> None:
         """Validate and process parameters after initialization."""
@@ -74,9 +96,9 @@ class StitchingParameters(BaseModel):
         self.input_folder = os.path.abspath(self.input_folder)
 
     @property
-    def stitched_folder(self) -> str:
+    def stitched_folder(self) -> pathlib.Path:
         """Path to folder containing stitched outputs."""
-        return os.path.join(
+        return pathlib.Path(
             self.input_folder + "_stitched_" + datetime.now().strftime(DATETIME_FORMAT)
         )
 
@@ -116,6 +138,15 @@ class ReverseRows(enum.Enum):
 
     even = "even"
     odd = "odd"
+
+    def is_reversed(self, row_idx: int) -> bool:
+        match self:
+            case ReverseRows.even:
+                return row_idx % 2 == 0
+            case ReverseRows.odd:
+                return row_idx % 2 == 1
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 @dataclass
@@ -465,8 +496,8 @@ class StitchingComputedParameters:
         self.xy_positions = sorted(
             (tile_info.x, tile_info.y) for tile_info in region_data.values()
         )
-        x_positions = sorted(set(x for (x, _) in self.xy_positions))
-        y_positions = sorted(set(y for (_, y) in self.xy_positions))
+        x_positions = self.x_positions
+        y_positions = self.y_positions
 
         if self.parent.use_registration:
             # Calculate dimensions with registration shifts
@@ -542,3 +573,23 @@ class StitchingComputedParameters:
         rows = sorted(set(region[0] for region in self.regions))
         columns = sorted(set(region[1:] for region in self.regions))
         return rows, columns
+
+    @property
+    def x_positions(self) -> list[float]:
+        """Get the unique x positions in the acquired images.
+
+        The existing code only supports grid-aligned scan patterns, but in the
+        future this will have to be replaced in favor of an altenate method for
+        scans that are not perfectly aligned to a grid.
+        """
+        return sorted(set(x for x, _ in self.xy_positions))
+
+    @property
+    def y_positions(self) -> list[float]:
+        """Get the unique y positions in the acquired images.
+
+        The existing code only supports grid-aligned scan patterns, but in the
+        future this will have to be replaced in favor of an altenate method for
+        scans that are not perfectly aligned to a grid.
+        """
+        return sorted(set(y for _, y in self.xy_positions))
