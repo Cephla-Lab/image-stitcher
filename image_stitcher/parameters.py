@@ -11,8 +11,7 @@ from typing import Annotated, Any, ClassVar, NamedTuple, assert_never
 import numpy as np
 import pandas as pd
 from dask_image.imread import imread as dask_imread
-from pydantic import AfterValidator
-from pydantic_settings import BaseSettings
+from pydantic import AfterValidator, BaseModel
 
 DATETIME_FORMAT = "%Y-%m-%d_%H-%M-%S.%f"
 
@@ -44,9 +43,7 @@ def z_non_negative(num: int) -> int:
 
 
 class StitchingParameters(
-    BaseSettings,
-    cli_parse_args=True,
-    cli_prog_name="image_stitcher",
+    BaseModel,
     use_attribute_docstrings=True,
 ):
     """Parameters for microscopy image stitching operations."""

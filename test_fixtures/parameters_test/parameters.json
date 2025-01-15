@@ -8,5 +8,6 @@
   "dynamic_registration": false,
   "scan_pattern": "Unidirectional",
   "merge_timepoints": false,
-  "merge_hcs_regions": false
+  "merge_hcs_regions": false,
+  "verbose": false
 }
