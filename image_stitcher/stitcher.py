@@ -1,3 +1,4 @@
+import collections
 import logging
 import os
 import pathlib
@@ -12,6 +13,8 @@ import zarr
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter, OmeZarrWriter
 from dask_image.imread import imread as dask_imread
+from multiview_stitcher import fusion, msi_utils
+from multiview_stitcher import spatial_image_utils as si_utils
 
 from .parameters import (
     OutputFormat,
@@ -19,6 +22,8 @@ from .parameters import (
     StitchingComputedParameters,
     StitchingParameters,
 )
+
+USE_MULTIVIEW = os.environ.get("USE_MULTIVIEW") == "1"
 
 
 @dataclass
@@ -250,73 +255,146 @@ class Stitcher:
             f"Beginning stitching of {total_tiles} tiles for region {region} timepoint {timepoint}"
         )
 
+        msims = []
+
+        groups = collections.defaultdict(list)
+
+        for key in region_metadata:
+            groups[key.fov].append(key)
+
         # Process each tile with progress tracking
-        for key, tile_info in region_metadata.items():
-            t, _, _, z_level, channel = key
-            tile = dask_imread(tile_info.filepath)[0]
+        for group in groups.values():
+            group_arr = None
+            x_pixel = 0
+            y_pixel = 0
 
-            if self.params.use_registration:
-                col_index = self.computed_parameters.x_positions.index(tile_info.x)
-                row_index = self.computed_parameters.y_positions.index(tile_info.y)
+            for key in group:
+                tile_info = region_metadata[key]
 
-                if isinstance(
-                    self.computed_parameters.scan_params, SPatternScanParams
-                ) and self.computed_parameters.scan_params.h_shift_rev_rows.is_reversed(
-                    row_index
-                ):
-                    h_shift = self.computed_parameters.scan_params.h_shift_rev
+                t, _, _, z_level, channel = key
+                channel_idx = self.computed_parameters.monochrome_channels.index(
+                    channel
+                )
+                tile = dask_imread(tile_info.filepath)[0]
+                assert len(tile.shape) == 2
+                if group_arr is None:
+                    chunks = self.computed_parameters.chunks
+                    # TODO(colin): will this ever be too large?
+                    chunks = (
+                        self.computed_parameters.num_c,
+                        self.computed_parameters.num_z,
+                        chunks[3],
+                        chunks[4],
+                    )
+                    nonnull_group_arr = da.zeros(
+                        (
+                            self.computed_parameters.num_c,
+                            self.computed_parameters.num_z,
+                            tile.shape[0],
+                            tile.shape[1],
+                        ),
+                        dtype=self.computed_parameters.dtype,
+                        chunks=chunks,
+                    )
+                    group_arr = nonnull_group_arr
                 else:
-                    h_shift = self.computed_parameters.scan_params.h_shift
+                    nonnull_group_arr = group_arr
 
-                x_pixel = int(
-                    col_index * (self.computed_parameters.input_width + h_shift[1])
-                )
-                y_pixel = int(
-                    row_index
-                    * (
-                        self.computed_parameters.input_height
-                        + self.computed_parameters.scan_params.v_shift[0]
-                    )
-                )
+                if self.params.use_registration:
+                    col_index = self.computed_parameters.x_positions.index(tile_info.x)
+                    row_index = self.computed_parameters.y_positions.index(tile_info.y)
 
-                # TODO(colin): this looks like we're attempting to deal with
-                # non-grid-aligned patterns perhaps, but I think our assumptions
-                # on how we calculate the number of rows and columns are
-                # incompatible with that unless we're moving on a perfect
-                # diagonal?
-                if h_shift[0] < 0:
-                    y_pixel += int(
-                        (len(self.computed_parameters.x_positions) - 1 - col_index)
-                        * abs(h_shift[0])
+                    if (
+                        isinstance(
+                            self.computed_parameters.scan_params, SPatternScanParams
+                        )
+                        and self.computed_parameters.scan_params.h_shift_rev_rows.is_reversed(
+                            row_index
+                        )
+                    ):
+                        h_shift = self.computed_parameters.scan_params.h_shift_rev
+                    else:
+                        h_shift = self.computed_parameters.scan_params.h_shift
+
+                    x_pixel = int(
+                        col_index * (self.computed_parameters.input_width + h_shift[1])
                     )
+                    y_pixel = int(
+                        row_index
+                        * (
+                            self.computed_parameters.input_height
+                            + self.computed_parameters.scan_params.v_shift[0]
+                        )
+                    )
+
+                    # TODO(colin): this looks like we're attempting to deal with
+                    # non-grid-aligned patterns perhaps, but I think our assumptions
+                    # on how we calculate the number of rows and columns are
+                    # incompatible with that unless we're moving on a perfect
+                    # diagonal?
+                    if h_shift[0] < 0:
+                        y_pixel += int(
+                            (len(self.computed_parameters.x_positions) - 1 - col_index)
+                            * abs(h_shift[0])
+                        )
+                    else:
+                        y_pixel += int(col_index * h_shift[0])
+
+                    if self.computed_parameters.scan_params.v_shift[1] < 0:
+                        x_pixel += int(
+                            (len(self.computed_parameters.y_positions) - 1 - row_index)
+                            * abs(self.computed_parameters.scan_params.v_shift[1])
+                        )
+                    else:
+                        x_pixel += int(
+                            row_index * self.computed_parameters.scan_params.v_shift[1]
+                        )
                 else:
-                    y_pixel += int(col_index * h_shift[0])
-
-                if self.computed_parameters.scan_params.v_shift[1] < 0:
-                    x_pixel += int(
-                        (len(self.computed_parameters.y_positions) - 1 - row_index)
-                        * abs(self.computed_parameters.scan_params.v_shift[1])
+                    x_pixel = int(
+                        (tile_info.x - x_min)
+                        * 1000
+                        / self.computed_parameters.pixel_size_um
                     )
+                    y_pixel = int(
+                        (tile_info.y - y_min)
+                        * 1000
+                        / self.computed_parameters.pixel_size_um
+                    )
+
+                if USE_MULTIVIEW:
+                    nonnull_group_arr[channel_idx, z_level, :, :] = tile
                 else:
-                    x_pixel += int(
-                        row_index * self.computed_parameters.scan_params.v_shift[1]
+                    self.place_tile(
+                        stitched_region, tile, x_pixel, y_pixel, z_level, channel
                     )
-            else:
-                x_pixel = int(
-                    (tile_info.x - x_min)
-                    * 1000
-                    / self.computed_parameters.pixel_size_um
-                )
-                y_pixel = int(
-                    (tile_info.y - y_min)
-                    * 1000
-                    / self.computed_parameters.pixel_size_um
-                )
 
-            self.place_tile(stitched_region, tile, x_pixel, y_pixel, z_level, channel)
+                self.callbacks.update_progress(processed_tiles, total_tiles)
+                processed_tiles += 1
 
-            self.callbacks.update_progress(processed_tiles, total_tiles)
-            processed_tiles += 1
+            if USE_MULTIVIEW:
+                assert group_arr is not None
+                sim = si_utils.get_sim_from_array(
+                    group_arr,
+                    dims=["c", "z", "y", "x"],
+                    # STOPSHIP(colin): what is this for?
+                    scale={
+                        "z": 1,
+                        "y": 1,
+                        "x": 1,
+                    },
+                    translation={"z": 0, "y": y_pixel, "x": x_pixel},
+                    transform_key="stage_metadata",
+                    c_coords=self.computed_parameters.monochrome_channels,
+                )
+                msims.append(msi_utils.get_msim_from_sim(sim, scale_factors=[]))
+
+        if USE_MULTIVIEW:
+            logging.info("Using multiview for stitching")
+            fused_sim = fusion.fuse(
+                [msi_utils.get_sim_from_msim(msim) for msim in msims],
+                transform_key="stage_metadata",
+            )
+            stitched_region = fused_sim.data
 
         logging.info(
             f"Time to stitch region {region} timepoint {t}: {time.time() - start_time}"
