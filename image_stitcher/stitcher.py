@@ -10,6 +10,7 @@ import dask.array as da
 import numpy as np
 import ome_zarr
 import psutil
+import skimage
 import zarr
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter, OmeZarrWriter
@@ -282,7 +283,7 @@ class Stitcher:
         # Process each tile with progress tracking
         for key, tile_info in region_metadata.items():
             t, _, _, z_level, channel = key
-            tile = dask_imread(tile_info.filepath)[0]
+            tile = skimage.io.imread(tile_info.filepath)
 
             if self.params.use_registration:
                 col_index = self.computed_parameters.x_positions.index(tile_info.x)
@@ -981,6 +982,7 @@ class Stitcher:
 
                 # Stitch region
                 self.callbacks.starting_stitching()
+
                 stitched_region = self.stitch_region(timepoint, region)
                 with debug_timing("rechunking"):
                     if isinstance(stitched_region, da.Array):
