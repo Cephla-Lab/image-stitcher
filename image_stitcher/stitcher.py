@@ -1,15 +1,13 @@
-import functools
 import logging
 import os
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import Callable, Self, cast
+from typing import Callable, Literal, Self, TypedDict, cast
 
 import dask.array as da
 import numpy as np
 import ome_zarr
-import psutil
 import zarr
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter, OmeZarrWriter
@@ -80,6 +78,18 @@ class Paths:
         return self.hcs_timepoints_dir / f"complete_hcs{self.output_format.value}"
 
 
+class ScaleTransform(TypedDict):
+    type: Literal["scale"]
+    # t, c, z, y, x scales
+    scale: tuple[int, int, int, int, int]
+
+
+@dataclass
+class PyramidLevel:
+    image: da.Array
+    transform: ScaleTransform
+
+
 class Stitcher:
     def __init__(
         self,
@@ -112,48 +122,18 @@ class Stitcher:
         logging.debug(
             f"region {region} timepoint {timepoint} output array dimensions: {output_shape}"
         )
-        output_estimated_memory_required = (
-            functools.reduce(lambda a, b: a * b, output_shape)
-            * self.computed_parameters.dtype.itemsize
-        )
-        # psutil docs say the available item of this function's output tries to
-        # be a cross-platform measure of how much memory could be used before
-        # swap is required
-        estimated_available_memory = psutil.virtual_memory().available
-
-        if output_estimated_memory_required < 0.8 * estimated_available_memory:
-            # If the whole stitched image fits into memory, just store it as a
-            # single chunk.
-            chunks = output_shape
-            # For zarr, we get an error if the chunk size is larger than this.
-            # I've also seen dask hang with very large chunks, and empirically
-            # this seems to get around it in my test case.
-            # TODO(colin): determine if this is actually necessary for dask or
-            # if there's a better fix.
-            if output_estimated_memory_required > 2**31 - 1:
-                chunks = (
-                    1,
-                    1,
-                    1,
-                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
-                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
-                )
-        else:
-            # TODO(colin): this might be too small in many cases; we should try
-            # setting a chunk size based on available memory? Need a benchmark
-            # for this case to test that out.
-            chunks = self.computed_parameters.chunks
+        chunks = self.computed_parameters.chunks[(timepoint, region)]
 
         logging.debug(f"Using output array chunk size {chunks}")
 
-        return cast(
-            da.Array,
-            da.zeros(
-                output_shape,
-                dtype=self.computed_parameters.dtype,
-                chunks=chunks,
-            ),
+        # return np.zeros(output_shape, dtype=self.computed_parameters.dtype)
+        arr = da.zeros(
+            output_shape,
+            dtype=self.computed_parameters.dtype,
+            chunks=chunks,
         )
+
+        return cast(da.Array, arr)
 
     def get_tile(
         self, t: int, region: str, x: float, y: float, channel: str, z_level: int
@@ -401,7 +381,7 @@ class Stitcher:
                 physical_pixel_sizes=physical_pixel_sizes,
                 channel_names=self.computed_parameters.monochrome_channels,
                 channel_colors=self.computed_parameters.monochrome_colors,  # rgb_colors,
-                chunk_dims=self.computed_parameters.chunks,
+                chunk_dims=self.computed_parameters.chunks[(timepoint, region)],
                 scale_num_levels=self.computed_parameters.num_pyramid_levels,
                 scale_factor=2.0,
                 dimension_order="TCZYX",
@@ -454,10 +434,16 @@ class Stitcher:
         Returns:
             path to the saved OME-ZARR file
         """
+        from .ome_zarr_multiscale import write_ome_zarr
+
         start_time = time.time()
         output_path = self.paths.per_timepoint_region_output(timepoint, region)
         output_path.parent.mkdir(exist_ok=True, parents=True)
         logging.info(f"Writing OME-ZARR to: {output_path}")
+
+        stitched_region = stitched_region.rechunk((1, 1, 1, 2700, 2700))
+        write_ome_zarr(output_path, stitched_region, 2700)
+        return output_path
 
         # Create zarr store and root group
         store = ome_zarr.io.parse_url(output_path, mode="w").store
@@ -498,7 +484,7 @@ class Stitcher:
 
         # Configure storage options with optimal chunking
         storage_opts = {
-            "chunks": self.computed_parameters.chunks,
+            "chunks": self.computed_parameters.chunks[(timepoint, region)],
             "compressor": zarr.storage.default_compressor,
         }
 
@@ -617,7 +603,12 @@ class Stitcher:
             pyramid = self.generate_pyramid(
                 merged_data, self.computed_parameters.num_pyramid_levels
             )
-            storage_options = {"chunks": self.computed_parameters.chunks}
+            # arbitrarily choose the first timepoint to determine chunking strategy
+            # TODO(colin): optimize this.
+            chunks_key = next(
+                (t, r) for t, r in self.computed_parameters.chunks if r == region
+            )
+            storage_options = {"chunks": self.computed_parameters.chunks[chunks_key]}
             logging.info(f"Writing time series for region {region}")
             ome_zarr.writer.write_multiscale(
                 pyramid=pyramid,
@@ -665,7 +656,9 @@ class Stitcher:
                 z = zarr.open(zarr_path, mode="r")
                 t_array = cast(
                     da.Array,
-                    da.from_array(z["0"], chunks=self.computed_parameters.chunks),
+                    da.from_array(
+                        z["0"], chunks=self.computed_parameters.chunks[(t, region)]
+                    ),
                 )
                 t_data.append(t_array)
                 t_shapes.append(t_array.shape)
@@ -700,6 +693,8 @@ class Stitcher:
         return cast(
             da.Array, da.pad(array, pad_widths, mode="constant", constant_values=0)
         )
+
+    # def write_ome_zarr(self, to: pathlib.Path, pyramid_levels: list[PyramidLevel])
 
     def create_hcs_ome_zarr_per_timepoint(self) -> None:
         """Create separate HCS OME-ZARR files for each timepoint."""
@@ -800,7 +795,9 @@ class Stitcher:
                 pyramid = self.generate_pyramid(
                     data, self.computed_parameters.num_pyramid_levels
                 )
-                storage_options = {"chunks": self.computed_parameters.chunks}
+                storage_options = {
+                    "chunks": self.computed_parameters.chunks[(t, region)]
+                }
 
                 ome_zarr.writer.write_multiscale(
                     pyramid=pyramid,
@@ -923,7 +920,13 @@ class Stitcher:
             pyramid = self.generate_pyramid(
                 merged_data, self.computed_parameters.num_pyramid_levels
             )
-            storage_options = {"chunks": self.computed_parameters.chunks}
+
+            # arbitrarily choose the first timepoint to determine chunking strategy
+            # TODO(colin): optimize this.
+            chunks_key = next(
+                (t, r) for t, r in self.computed_parameters.chunks if r == region
+            )
+            storage_options = {"chunks": self.computed_parameters.chunks[chunks_key]}
 
             ome_zarr.writer.write_multiscale(
                 pyramid=pyramid,
@@ -993,9 +996,15 @@ class Stitcher:
                 # Save the region
                 self.callbacks.starting_saving(False)
                 if self.params.output_format == OutputFormat.ome_zarr:
+                    # import cProfile
+
+                    # pr = cProfile.Profile()
+                    # pr.enable()
                     output_path = self.save_region_ome_zarr(
                         timepoint, region, stitched_region
                     )
+                    # pr.disable()
+                    # pr.dump_stats("./save_profile.stats")
                 else:
                     assert self.params.output_format == OutputFormat.ome_tiff
                     output_path = self.save_region_aics(

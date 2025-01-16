@@ -1,4 +1,5 @@
 import enum
+import functools
 import json
 import logging
 import math
@@ -10,6 +11,7 @@ from typing import Annotated, Any, ClassVar, NamedTuple, assert_never
 
 import numpy as np
 import pandas as pd
+import psutil
 from dask_image.imread import imread as dask_imread
 from pydantic import AfterValidator, BaseModel
 
@@ -250,7 +252,8 @@ class StitchingComputedParameters:
     flatfields: dict[None, None] = field(init=False)
     acquisition_metadata: dict[MetaKey, AcquisitionMetadata] = field(init=False)
     dtype: np.dtype = field(init=False)
-    chunks: tuple[int, int, int, int, int] = field(init=False)
+    chunks: dict[tuple[int, int], tuple[int, int, int, int, int]] = field(init=False)
+    """A map from (timepoint, region) to dask/zarr array chunk sizes (t, c, z, y, x)."""
     xy_positions: list[tuple[float, float]] = field(init=False)
     regions: list[str] = field(default_factory=list)
     channel_names: list[str] = field(default_factory=list)
@@ -295,6 +298,62 @@ class StitchingComputedParameters:
         actual_mag = tube_lens_mm / obj_focal_length_mm
         self.pixel_size_um = sensor_pixel_size_um / actual_mag
         logging.info(f"pixel_size_um: {self.pixel_size_um}")
+
+    def compute_chunks(self) -> dict[tuple[int, int], tuple[int, int, int, int, int]]:
+        """Compute the optimial chunk size for dask storage.
+
+        Empirically it seems that larger chunks are faster (so long as we can
+        keep them in memory) up to 2**31-1 bytes at which point we start to run
+        into problems (hard errors from some zarr operations; occasional hanging
+        from dask).
+
+        Returns a map from (timepoint, region) to chunks sizes (t, c, z, y, x)
+        """
+        # psutil docs say the available item of this function's output tries to
+        # be a cross-platform measure of how much memory could be used before
+        # swap is required
+        estimated_available_memory = psutil.virtual_memory().available
+        chunks = {}
+
+        for timepoint in self.timepoints:
+            for region in self.regions:
+                width, height = self.calculate_output_dimensions(timepoint, region)
+
+                full_in_memory_output_shape = (
+                    1,
+                    self.num_c,
+                    self.num_z,
+                    height,
+                    width,
+                )
+                output_estimated_memory_required = (
+                    functools.reduce(lambda a, b: a * b, full_in_memory_output_shape)
+                    * self.dtype.itemsize
+                )
+                if output_estimated_memory_required < 0.8 * estimated_available_memory:
+                    if output_estimated_memory_required > 2**31 - 1:
+                        chunks[(timepoint, region)] = (
+                            1,
+                            1,
+                            1,
+                            StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
+                            StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
+                        )
+                    else:
+                        chunks[(timepoint, region)] = full_in_memory_output_shape
+                else:
+                    # TODO(colin): this might be too small in many cases; we should try
+                    # setting this chunk size based on available memory too?
+                    # Need a benchmark for this case to test that out.
+                    chunks[(timepoint, region)] = (
+                        1,
+                        1,
+                        1,
+                        self.input_height,
+                        self.input_width,
+                    )
+
+        return chunks
 
     def parse_acquisition_metadata(self) -> None:
         """Parse image filenames and matche them to coordinates for stitching.
@@ -400,16 +459,6 @@ class StitchingComputedParameters:
             self.input_height, self.input_width = first_image.shape[:2]
         else:
             raise ValueError(f"Unexpected image shape: {first_image.shape}")
-        # TODO(colin): further tune the chunk size. Empirically, increasing from
-        # 512x512 to the image size was a huge (25x or more in some cases)
-        # speedup. Is even bigger better?
-        self.chunks = (
-            1,
-            1,
-            1,
-            min(self.input_height, self.CHUNK_SIZE_LIMIT_PX),
-            min(self.input_width, self.CHUNK_SIZE_LIMIT_PX),
-        )
 
         # Set up final monochrome channels
         self.monochrome_channels = []
@@ -431,6 +480,7 @@ class StitchingComputedParameters:
         self.monochrome_colors = [
             self.get_channel_color(name) for name in self.monochrome_channels
         ]
+        self.chunks = self.compute_chunks()
 
         # Print out information about the dataset
         logging.info(f"Regions: {self.regions}, Channels: {self.channel_names}")
