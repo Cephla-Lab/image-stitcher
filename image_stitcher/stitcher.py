@@ -1,3 +1,4 @@
+import functools
 import logging
 import os
 import pathlib
@@ -8,6 +9,7 @@ from typing import Callable, Self, cast
 import dask.array as da
 import numpy as np
 import ome_zarr
+import psutil
 import zarr
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter, OmeZarrWriter
@@ -110,12 +112,46 @@ class Stitcher:
         logging.debug(
             f"region {region} timepoint {timepoint} output array dimensions: {output_shape}"
         )
+        output_estimated_memory_required = (
+            functools.reduce(lambda a, b: a * b, output_shape)
+            * self.computed_parameters.dtype.itemsize
+        )
+        # psutil docs say the available item of this function's output tries to
+        # be a cross-platform measure of how much memory could be used before
+        # swap is required
+        estimated_available_memory = psutil.virtual_memory().available
+
+        if output_estimated_memory_required < 0.8 * estimated_available_memory:
+            # If the whole stitched image fits into memory, just store it as a
+            # single chunk.
+            chunks = output_shape
+            # For zarr, we get an error if the chunk size is larger than this.
+            # I've also seen dask hang with very large chunks, and empirically
+            # this seems to get around it in my test case.
+            # TODO(colin): determine if this is actually necessary for dask or
+            # if there's a better fix.
+            if output_estimated_memory_required > 2**31 - 1:
+                chunks = (
+                    1,
+                    1,
+                    1,
+                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
+                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
+                )
+        else:
+            # TODO(colin): this might be too small in many cases; we should try
+            # setting a chunk size based on available memory? Need a benchmark
+            # for this case to test that out.
+            chunks = self.computed_parameters.chunks
+
+        logging.debug(f"Using output array chunk size {chunks}")
+
         return cast(
             da.Array,
             da.zeros(
                 output_shape,
                 dtype=self.computed_parameters.dtype,
-                chunks=self.computed_parameters.chunks,
+                chunks=chunks,
             ),
         )
 

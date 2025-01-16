@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=2.0.0",
     "ome-zarr>=0.10.3",
     "pandas>=2.2.3",
+    "psutil>=6.1.1",
     "pydantic>=2.10.5",
     "pydantic-core>=2.27.2",
     "pydantic-settings>=2.7.1",
@@ -51,4 +52,8 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["napari.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["psutil.*"]
 ignore_missing_imports = true
