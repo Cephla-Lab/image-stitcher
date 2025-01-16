@@ -1,13 +1,15 @@
+import functools
 import logging
 import os
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import Callable, Self, cast
+from typing import Callable, Self
 
-import dask.array as da
 import numpy as np
 import ome_zarr
+import psutil
+import skimage.io
 import zarr
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter, OmeZarrWriter
@@ -95,7 +97,7 @@ class Stitcher:
             self._paths = Paths(self.params.stitched_folder, self.params.output_format)
         return self._paths
 
-    def create_output_array(self, timepoint: int, region: str) -> da.Array:
+    def create_output_array(self, timepoint: int, region: str) -> zarr.Array:
         width, height = self.computed_parameters.calculate_output_dimensions(
             timepoint, region
         )
@@ -110,18 +112,46 @@ class Stitcher:
         logging.debug(
             f"region {region} timepoint {timepoint} output array dimensions: {output_shape}"
         )
-        return cast(
-            da.Array,
-            da.zeros(
-                output_shape,
-                dtype=self.computed_parameters.dtype,
-                chunks=self.computed_parameters.chunks,
-            ),
+        approx_required_memory = (
+            functools.reduce(lambda a, b: a * b, output_shape)
+            * self.computed_parameters.dtype.itemsize
+        )
+        # psutil docs say the available item of this function's output tries to
+        # be a cross-platform measure of how much memory could be used before
+        # swap is required
+        available_memory = psutil.virtual_memory().available
+        if approx_required_memory < 0.8 * available_memory:
+            store = zarr.storage.MemoryStore()
+            # If the whole stitched image fits into memory, just store it as a
+            # single chunk if we can. Unfortunately we seem to get an error if a
+            # chunk is larger than 2**31 - 1 bytes, so if that will happen, we
+            # use a fixed maximum chunk size instead.
+            if approx_required_memory > 2**31 - 1:
+                chunks = (
+                    1,
+                    1,
+                    1,
+                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
+                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
+                )
+            else:
+                chunks = output_shape
+            logging.debug(f"Chunking output image in size: {chunks}")
+        else:
+            # TODO(colin): implement a disk-backed store and chunk size tuning here.
+            raise NotImplementedError(
+                "Disk-backed zarr storage is not yet implemented."
+            )
+        return zarr.creation.create(
+            store=store,
+            shape=output_shape,
+            chunks=chunks,
+            dtype=self.computed_parameters.dtype,
         )
 
     def get_tile(
         self, t: int, region: str, x: float, y: float, channel: str, z_level: int
-    ) -> da.Array | None:
+    ) -> np.ndarray | None:
         """Get a specific tile using standardized data access."""
         region_metadata = self.computed_parameters.get_region_metadata(t, region)
 
@@ -133,7 +163,7 @@ class Stitcher:
                 and value.z_level == z_level
             ):
                 try:
-                    return cast(da.Array, dask_imread(value.filepath)[0])
+                    return skimage.io.imread(value.filepath)
                 except FileNotFoundError:
                     logging.warning(f"Warning: Tile file not found: {value.filepath}")
                     return None
@@ -145,8 +175,8 @@ class Stitcher:
 
     def place_tile(
         self,
-        stitched_region: da.Array,
-        tile: da.Array,
+        stitched_region: zarr.Array,
+        tile: np.ndarray,
         x_pixel: int,
         y_pixel: int,
         z_level: int,
@@ -192,8 +222,8 @@ class Stitcher:
 
     def place_single_channel_tile(
         self,
-        stitched_region: da.Array,
-        tile: da.Array,
+        stitched_region: zarr.Array,
+        tile: np.ndarray,
         x_pixel: int,
         y_pixel: int,
         z_level: int,
@@ -234,7 +264,7 @@ class Stitcher:
             )
             raise
 
-    def stitch_region(self, timepoint: int, region: str) -> da.Array:
+    def stitch_region(self, timepoint: int, region: str) -> zarr.Array:
         """Stitch and save single region for a specific timepoint."""
         start_time = time.time()
         # Initialize output array
@@ -324,87 +354,12 @@ class Stitcher:
         return stitched_region
 
     def save_region_aics(
-        self, timepoint: int, region: str, stitched_region: da.Array
+        self, timepoint: int, region: str, stitched_region: zarr.Array
     ) -> pathlib.Path:
-        """Save stitched region data as OME-ZARR or OME-TIFF using aicsimageio."""
-        start_time = time.time()
-        # Ensure output directory exists
-        output_path = self.paths.per_timepoint_region_output(timepoint, region)
-        output_path.parent.mkdir(exist_ok=True, parents=True)
-
-        # Create physical pixel sizes object
-        physical_pixel_sizes = aics_types.PhysicalPixelSizes(
-            Z=self.computed_parameters.acquisition_params.get("dz(um)", 1.0),
-            Y=self.computed_parameters.pixel_size_um,
-            X=self.computed_parameters.pixel_size_um,
-        )
-
-        # Convert colors to RGB lists for OME format
-        rgb_colors = [
-            [c >> 16, (c >> 8) & 0xFF, c & 0xFF]
-            for c in self.computed_parameters.monochrome_colors
-        ]
-
-        if self.params.output_format == OutputFormat.ome_zarr:
-            logging.info(f"Writing OME-ZARR to: {output_path}")
-            writer = OmeZarrWriter(output_path)
-
-            # Build OME metadata for Zarr
-            # ome_meta = writer.build_ome(
-            #     size_z=self.num_z,
-            #     image_name=f"{region}_t{timepoint}",
-            #     channel_names=self.monochrome_channels,
-            #     channel_colors=self.monochrome_colors,
-            #     channel_minmax=channel_minmax
-            # )
-
-            # Write the image with metadata
-            writer.write_image(
-                image_data=stitched_region,
-                image_name=f"{region}_t{timepoint}",
-                physical_pixel_sizes=physical_pixel_sizes,
-                channel_names=self.computed_parameters.monochrome_channels,
-                channel_colors=self.computed_parameters.monochrome_colors,  # rgb_colors,
-                chunk_dims=self.computed_parameters.chunks,
-                scale_num_levels=self.computed_parameters.num_pyramid_levels,
-                scale_factor=2.0,
-                dimension_order="TCZYX",
-            )
-
-        else:
-            assert self.params.output_format == OutputFormat.ome_tiff
-            logging.info(f"Writing OME-TIFF to: {output_path}")
-
-            # Build OME metadata for TIFF
-            ome_meta = OmeTiffWriter.build_ome(
-                data_shapes=[stitched_region.shape],
-                data_types=[stitched_region.dtype],
-                dimension_order=["TCZYX"],
-                channel_names=[self.computed_parameters.monochrome_channels],
-                image_name=[f"{region}_t{timepoint}"],
-                physical_pixel_sizes=[physical_pixel_sizes],
-                channel_colors=[rgb_colors],
-            )
-
-            # Write the image with metadata
-            OmeTiffWriter.save(
-                data=stitched_region,
-                uri=output_path,
-                dim_order="TCZYX",
-                ome_xml=ome_meta,
-                channel_names=self.computed_parameters.monochrome_channels,
-                physical_pixel_sizes=physical_pixel_sizes,
-                channel_colors=rgb_colors,
-            )
-
-        logging.info(f"Successfully saved to: {output_path}")
-        logging.info(
-            f"Time to save region {region} timepoint {timepoint}: {time.time() - start_time}"
-        )
-        return output_path
+        raise NotImplementedError("Image saving with AICS not yet implemented")
 
     def save_region_ome_zarr(
-        self, timepoint: int, region: str, stitched_region: da.Array
+        self, timepoint: int, region: str, stitched_region: zarr.Array
     ) -> pathlib.Path:
         """Save stitched region data as OME-ZARR using direct pyramid writing.
 
@@ -516,18 +471,10 @@ class Stitcher:
         )
         return output_path
 
-    def generate_pyramid(self, image: da.Array, num_levels: int) -> list[da.Array]:
-        pyramid = [image]
-        for level in range(1, num_levels):
-            scale_factor = 2**level
-            factors = {0: 1, 1: 1, 2: 1, 3: scale_factor, 4: scale_factor}
-            # TODO/NOTE(colin): there are many possible ways to downscale an
-            # image that are more or less appopriate for different usecases.
-            # Expose the method as a parameter? (For example, np.mean is
-            # inapproriate for binarized or labelled masks stored as normal images.)
-            downsampled = da.coarsen(np.mean, image, factors, trim_excess=True)
-            pyramid.append(downsampled)
-        return pyramid
+    def generate_pyramid(self, image: zarr.Array, num_levels: int) -> list[zarr.Array]:
+        raise NotImplementedError(
+            "Generate pyramid is not yet implemented for zarr arrays."
+        )
 
     def merge_timepoints_per_region(self) -> None:
         # For each region, load and merge its timepoints
@@ -616,53 +563,10 @@ class Stitcher:
 
         self.callbacks.finished_saving(str(output_path), self.computed_parameters.dtype)
 
-    def load_and_merge_timepoints(self, region: str) -> da.Array:
+    def load_and_merge_timepoints(self, region: str) -> zarr.Array:
         """Load and merge all timepoints for a specific region."""
-        t_data = []
-        t_shapes = []
-
-        for t in self.computed_parameters.timepoints:
-            zarr_path = self.paths.per_timepoint_region_output(t, region)
-            logging.info(f"Loading t:{t} region:{region}, path:{zarr_path}")
-
-            try:
-                z = zarr.open(zarr_path, mode="r")
-                t_array = cast(
-                    da.Array,
-                    da.from_array(z["0"], chunks=self.computed_parameters.chunks),
-                )
-                t_data.append(t_array)
-                t_shapes.append(t_array.shape)
-            except Exception as e:
-                logging.error(f"Error loading timepoint {t}, region {region}: {e}")
-                continue
-
-        if not t_data:
-            raise ValueError(f"No data loaded from any timepoints for region {region}")
-
-        # Handle single vs multiple timepoints
-        if len(t_data) == 1:
-            return t_data[0]
-
-        # Pad arrays to largest size and concatenate
-        max_shape = tuple(max(s) for s in zip(*t_shapes))
-        padded_data = [self.pad_to_largest(t, max_shape) for t in t_data]
-        merged_data = cast(da.Array, da.concatenate(padded_data, axis=0))
-        logging.debug(
-            f"Merged timepoints shape for region {region}: {merged_data.shape}"
-        )
-        return merged_data
-
-    def pad_to_largest(
-        self, array: da.Array, target_shape: tuple[int, ...]
-    ) -> da.Array:
-        """Pad array to match target shape."""
-        assert len(array.shape) == len(target_shape)
-        if array.shape == target_shape:
-            return array
-        pad_widths = [(0, max(0, ts - s)) for s, ts in zip(array.shape, target_shape)]
-        return cast(
-            da.Array, da.pad(array, pad_widths, mode="constant", constant_values=0)
+        raise NotImplementedError(
+            "Merging timepoints is not yet impelmented for zarr arrays."
         )
 
     def create_hcs_ome_zarr_per_timepoint(self) -> None:
@@ -709,8 +613,7 @@ class Stitcher:
                     continue
 
                 # Load data from existing zarr
-                z = zarr.open(region_path, mode="r")
-                data = da.from_array(z["0"])
+                data = zarr.open(region_path, mode="r")["0"]
 
                 # Create well hierarchy
                 row, col = region[0], region[1:]

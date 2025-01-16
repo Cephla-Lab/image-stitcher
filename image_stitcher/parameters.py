@@ -10,7 +10,7 @@ from typing import Annotated, Any, ClassVar, NamedTuple, assert_never
 
 import numpy as np
 import pandas as pd
-from dask_image.imread import imread as dask_imread
+import skimage.io
 from pydantic import AfterValidator, BaseModel
 
 DATETIME_FORMAT = "%Y-%m-%d_%H-%M-%S.%f"
@@ -391,7 +391,7 @@ class StitchingComputedParameters:
 
         # Set up image parameters based on the first image
         first_meta = list(self.acquisition_metadata.values())[0]
-        first_image = dask_imread(first_meta.filepath)[0]
+        first_image = skimage.io.imread(first_meta.filepath)
 
         self.dtype = first_image.dtype
         if len(first_image.shape) == 2:
@@ -416,9 +416,9 @@ class StitchingComputedParameters:
         for channel in self.channel_names:
             (t, region, fov, z_level, _) = first_meta.key
             channel_key = MetaKey(t, region, fov, z_level, channel)
-            channel_image = dask_imread(
+            channel_image = skimage.io.imread(
                 self.acquisition_metadata[channel_key].filepath
-            )[0]
+            )
             if len(channel_image.shape) == 3 and channel_image.shape[2] == 3:
                 channel = channel.split("_")[0]
                 self.monochrome_channels.extend(

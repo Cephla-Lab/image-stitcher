@@ -5,14 +5,15 @@ description = "Stitch together 5D images into OME-zarr files."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aicsimageio>=4.14.0",
     "dask-image>=2024.5.3",
     "numpy>=2.0.0",
     "ome-zarr>=0.10.3",
     "pandas>=2.2.3",
+    "psutil>=6.1.1",
     "pydantic>=2.10.5",
     "pydantic-core>=2.27.2",
     "pydantic-settings>=2.7.1",
+    "zarr>=2.18.4,<3",
 ]
 
 [project.optional-dependencies]
