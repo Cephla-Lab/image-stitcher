@@ -15,6 +15,8 @@ from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter, OmeZarrWriter
 from dask_image.imread import imread as dask_imread
 
+from image_stitcher.benchmarking_util import debug_timing
+
 from .parameters import (
     OutputFormat,
     SPatternScanParams,
@@ -80,6 +82,12 @@ class Paths:
         return self.hcs_timepoints_dir / f"complete_hcs{self.output_format.value}"
 
 
+# We want to choose the type of the stitched array based on the amount of memory
+# available.  If we can fit the whole computation in memory, use numpy for the
+# stitching since that is faster, otherwise use dask.
+AnyArray = np.ndarray | da.Array
+
+
 class Stitcher:
     def __init__(
         self,
@@ -97,7 +105,7 @@ class Stitcher:
             self._paths = Paths(self.params.stitched_folder, self.params.output_format)
         return self._paths
 
-    def create_output_array(self, timepoint: int, region: str) -> da.Array:
+    def create_output_array(self, timepoint: int, region: str) -> AnyArray:
         width, height = self.computed_parameters.calculate_output_dimensions(
             timepoint, region
         )
@@ -123,37 +131,22 @@ class Stitcher:
 
         if output_estimated_memory_required < 0.8 * estimated_available_memory:
             # If the whole stitched image fits into memory, just store it as a
-            # single chunk.
-            chunks = output_shape
-            # For zarr, we get an error if the chunk size is larger than this.
-            # I've also seen dask hang with very large chunks, and empirically
-            # this seems to get around it in my test case.
-            # TODO(colin): determine if this is actually necessary for dask or
-            # if there's a better fix.
-            if output_estimated_memory_required > 2**31 - 1:
-                chunks = (
-                    1,
-                    1,
-                    1,
-                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
-                    StitchingComputedParameters.CHUNK_SIZE_LIMIT_PX,
-                )
+            # single numpy array.
+            return np.zeros(output_shape, dtype=self.computed_parameters.dtype)
         else:
             # TODO(colin): this might be too small in many cases; we should try
             # setting a chunk size based on available memory? Need a benchmark
             # for this case to test that out.
             chunks = self.computed_parameters.chunks
 
-        logging.debug(f"Using output array chunk size {chunks}")
-
-        return cast(
-            da.Array,
-            da.zeros(
-                output_shape,
-                dtype=self.computed_parameters.dtype,
-                chunks=chunks,
-            ),
-        )
+            return cast(
+                da.Array,
+                da.zeros(
+                    output_shape,
+                    dtype=self.computed_parameters.dtype,
+                    chunks=chunks,
+                ),
+            )
 
     def get_tile(
         self, t: int, region: str, x: float, y: float, channel: str, z_level: int
@@ -181,8 +174,8 @@ class Stitcher:
 
     def place_tile(
         self,
-        stitched_region: da.Array,
-        tile: da.Array,
+        stitched_region: AnyArray,
+        tile: AnyArray,
         x_pixel: int,
         y_pixel: int,
         z_level: int,
@@ -228,8 +221,8 @@ class Stitcher:
 
     def place_single_channel_tile(
         self,
-        stitched_region: da.Array,
-        tile: da.Array,
+        stitched_region: AnyArray,
+        tile: AnyArray,
         x_pixel: int,
         y_pixel: int,
         z_level: int,
@@ -270,7 +263,7 @@ class Stitcher:
             )
             raise
 
-    def stitch_region(self, timepoint: int, region: str) -> da.Array:
+    def stitch_region(self, timepoint: int, region: str) -> AnyArray:
         """Stitch and save single region for a specific timepoint."""
         start_time = time.time()
         # Initialize output array
@@ -989,17 +982,25 @@ class Stitcher:
                 # Stitch region
                 self.callbacks.starting_stitching()
                 stitched_region = self.stitch_region(timepoint, region)
+                with debug_timing("rechunking"):
+                    if isinstance(stitched_region, da.Array):
+                        dask_stitched_region = stitched_region
+                    else:
+                        dask_stitched_region = da.from_array(
+                            stitched_region,
+                            chunks=self.computed_parameters.chunks,
+                        )
 
                 # Save the region
                 self.callbacks.starting_saving(False)
                 if self.params.output_format == OutputFormat.ome_zarr:
                     output_path = self.save_region_ome_zarr(
-                        timepoint, region, stitched_region
+                        timepoint, region, dask_stitched_region
                     )
                 else:
                     assert self.params.output_format == OutputFormat.ome_tiff
                     output_path = self.save_region_aics(
-                        timepoint, region, stitched_region
+                        timepoint, region, dask_stitched_region
                     )
 
                 logging.info(
