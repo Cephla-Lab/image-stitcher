@@ -991,6 +991,7 @@ class Stitcher:
                         dask_stitched_region = da.from_array(
                             stitched_region,
                             chunks=self.computed_parameters.chunks,
+                            name=f"stitched:t={timepoint},r={region}",
                         )
 
                 # Save the region
