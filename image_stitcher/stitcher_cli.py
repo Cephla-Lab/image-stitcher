@@ -11,6 +11,8 @@ def main(args: list[str]) -> None:
     params = CliApp.run(StitchingParameters, cli_args=args)
     log_level = logging.DEBUG if params.verbose else logging.INFO
     logging.basicConfig(level=log_level)
+    # fsspec debug logs are very spammy
+    logging.getLogger("fsspec.local").setLevel(logging.INFO)
     Stitcher(params).run()
 
 

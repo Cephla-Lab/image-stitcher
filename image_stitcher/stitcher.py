@@ -458,10 +458,11 @@ class Stitcher:
         root = zarr.group(store=store)
 
         # Calculate pyramid using scaler - maintains efficiency for both dask and numpy arrays
-        scaler = ome_zarr.scale.Scaler(
-            max_layer=self.computed_parameters.num_pyramid_levels - 1
-        )
-        pyramid = scaler.nearest(stitched_region)
+        with debug_timing("scaler"):
+            scaler = ome_zarr.scale.Scaler(
+                max_layer=self.computed_parameters.num_pyramid_levels - 1
+            )
+            pyramid = scaler.nearest(stitched_region)
 
         # Define correct physical coordinates with proper micrometer scaling
         transforms = []
@@ -497,21 +498,22 @@ class Stitcher:
         }
 
         # Write pyramid data with full metadata
-        ome_zarr.writer.write_multiscale(
-            pyramid=pyramid,
-            group=root,
-            axes=[  # Required for OME-ZARR >= 0.3
-                {"name": "t", "type": "time", "unit": "second"},
-                {"name": "c", "type": "channel"},
-                {"name": "z", "type": "space", "unit": "micrometer"},
-                {"name": "y", "type": "space", "unit": "micrometer"},
-                {"name": "x", "type": "space", "unit": "micrometer"},
-            ],
-            coordinate_transformations=transforms,
-            storage_options=storage_opts,
-            name=f"{region}_t{timepoint}",
-            fmt=ome_zarr.format.CurrentFormat(),
-        )
+        with debug_timing(".write_multiscale()"):
+            ome_zarr.writer.write_multiscale(
+                pyramid=pyramid,
+                group=root,
+                axes=[  # Required for OME-ZARR >= 0.3
+                    {"name": "t", "type": "time", "unit": "second"},
+                    {"name": "c", "type": "channel"},
+                    {"name": "z", "type": "space", "unit": "micrometer"},
+                    {"name": "y", "type": "space", "unit": "micrometer"},
+                    {"name": "x", "type": "space", "unit": "micrometer"},
+                ],
+                coordinate_transformations=transforms,
+                storage_options=storage_opts,
+                name=f"{region}_t{timepoint}",
+                fmt=ome_zarr.format.CurrentFormat(),
+            )
 
         # Add complete OMERO metadata for visualization
         # Note(colin): this is an unusual API, but reading the Zarr library
