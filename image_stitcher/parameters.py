@@ -91,9 +91,8 @@ class StitchingParameters(
     verbose: bool = False
     """Show debug-level logging."""
 
-    def __post_init__(self) -> None:
+    def model_post_init(self, __context: Any) -> None:
         """Validate and process parameters after initialization."""
-        # Convert relative path to absolute
         self.input_folder = os.path.abspath(self.input_folder)
 
     @property
