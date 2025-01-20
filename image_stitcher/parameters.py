@@ -91,9 +91,18 @@ class StitchingParameters(
     verbose: bool = False
     """Show debug-level logging."""
 
-    def __post_init__(self) -> None:
+    force_stitch_to_disk: bool = False
+    """If true, force using a disk-backed stitching implementation regardless of input size.
+
+    (Otherwise, we use a disk-based implementation only if the full image
+    doesn't fit into memory.)
+
+    This can be useful for debugging and testing, or if you want to keep memory
+    usage as low as possible, at the cost of some processing speed.
+    """
+
+    def model_post_init(self, __context: Any) -> None:
         """Validate and process parameters after initialization."""
-        # Convert relative path to absolute
         self.input_folder = os.path.abspath(self.input_folder)
 
     @property

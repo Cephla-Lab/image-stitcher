@@ -35,6 +35,7 @@ def temporary_image_directory_params(
     step_mm: tuple[float, float] = (3.2, 3.2),
     sensor_pixel_size_µm: float = 7.52,
     magnification: float = 20.0,
+    disk_based_output_arr: bool = False,
 ) -> Generator[StitchingComputedParameters, None, None]:
     """Set up the files that the computed parameters requires for setup.
 
@@ -111,6 +112,8 @@ def temporary_image_directory_params(
             json.dump(acq_params, f)
 
         base_params = StitchingParameters.from_json_file(str(PARAMETERS_FIXTURE_FILE))
+        if disk_based_output_arr:
+            base_params.force_stitch_to_disk = True
         base_params.input_folder = str(base_dir)
         base_params.use_registration = False
         computed = StitchingComputedParameters(base_params)

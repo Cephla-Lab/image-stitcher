@@ -4,7 +4,7 @@ import os
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import Callable, Self, cast
+from typing import Any, Callable, Self, TypeAlias, cast
 
 import dask.array as da
 import numpy as np
@@ -12,6 +12,7 @@ import ome_zarr
 import psutil
 import skimage
 import zarr
+import zarr.storage
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter, OmeZarrWriter
 from dask_image.imread import imread as dask_imread
@@ -86,7 +87,7 @@ class Paths:
 # We want to choose the type of the stitched array based on the amount of memory
 # available.  If we can fit the whole computation in memory, use numpy for the
 # stitching since that is faster, otherwise use dask.
-AnyArray = np.ndarray | da.Array
+AnyArray: TypeAlias = np.ndarray | da.Array | zarr.Array
 
 
 class Stitcher:
@@ -130,23 +131,29 @@ class Stitcher:
         # swap is required
         estimated_available_memory = psutil.virtual_memory().available
 
-        if output_estimated_memory_required < 0.8 * estimated_available_memory:
+        if (
+            output_estimated_memory_required < 0.45 * estimated_available_memory
+            and not self.params.force_stitch_to_disk
+        ):
+            logging.debug("Using an in-memory numpy array for stitching.")
             # If the whole stitched image fits into memory, just store it as a
             # single numpy array.
             return np.zeros(output_shape, dtype=self.computed_parameters.dtype)
         else:
+            logging.debug("Using an on-disk zarr array for stitching.")
             # TODO(colin): this might be too small in many cases; we should try
             # setting a chunk size based on available memory? Need a benchmark
             # for this case to test that out.
             chunks = self.computed_parameters.chunks
-
-            return cast(
-                da.Array,
-                da.zeros(
-                    output_shape,
-                    dtype=self.computed_parameters.dtype,
-                    chunks=chunks,
-                ),
+            output_path = self.paths.per_timepoint_region_output(timepoint, region)
+            store = zarr.storage.DirectoryStore(output_path)
+            root = zarr.group(store)
+            return root.zeros(
+                name="0",
+                shape=output_shape,
+                dtype=self.computed_parameters.dtype,
+                chunks=chunks,
+                dimension_separator="/",
             )
 
     def get_tile(
@@ -457,15 +464,18 @@ class Stitcher:
         store = ome_zarr.io.parse_url(output_path, mode="w").store
         root = zarr.group(store=store)
 
-        # Calculate pyramid using scaler - maintains efficiency for both dask and numpy arrays
-        with debug_timing("scaler"):
-            scaler = ome_zarr.scale.Scaler(
-                max_layer=self.computed_parameters.num_pyramid_levels - 1
+        if not isinstance(stitched_region, da.Array):
+            pyramid = self.generate_pyramid(
+                da.from_array(stitched_region),
+                self.computed_parameters.num_pyramid_levels,
             )
-            pyramid = scaler.nearest(stitched_region)
+        else:
+            pyramid = self.generate_pyramid(
+                stitched_region, self.computed_parameters.num_pyramid_levels
+            )
 
         # Define correct physical coordinates with proper micrometer scaling
-        transforms = []
+        transforms: list[list[dict[str, Any]]] = []
         for level in range(self.computed_parameters.num_pyramid_levels):
             scale = 2**level
             transforms.append(
@@ -497,11 +507,44 @@ class Stitcher:
             "compressor": zarr.storage.default_compressor,
         }
 
-        # Write pyramid data with full metadata
-        with debug_timing(".write_multiscale()"):
-            ome_zarr.writer.write_multiscale(
-                pyramid=pyramid,
+        if isinstance(stitched_region, zarr.Array):
+            # We already stored the higest resolution version it its target
+            # location. In that case, for the first level we just need to write
+            # the metadata.
+            start_index = 1
+            datasets: list[dict[str, Any]] = [{"path": "0"}]
+        else:
+            start_index = 0
+            datasets = []
+
+        with debug_timing("write image data pyramid"):
+            for pyramid_idx in range(start_index, len(pyramid)):
+                da.to_zarr(
+                    arr=pyramid[pyramid_idx],
+                    url=root.store,
+                    component=str(pathlib.Path(root.path) / str(pyramid_idx)),
+                    storage_options=storage_opts,
+                    compressor=storage_opts.get(
+                        "compressor", zarr.storage.default_compressor
+                    ),
+                    dimension_separator="/",
+                    compute=True,
+                )
+                datasets.append({"path": str(pyramid_idx)})
+
+        fmt = ome_zarr.format.CurrentFormat()
+        fmt.validate_coordinate_transformations(
+            len(pyramid[0].shape), len(pyramid), transforms
+        )
+
+        for dataset, transform in zip(datasets, transforms):
+            dataset["coordinateTransformations"] = transform
+
+        with debug_timing(".write_multiscale_metadata()"):
+            ome_zarr.writer.write_multiscales_metadata(
                 group=root,
+                datasets=datasets,
+                fmt=fmt,
                 axes=[  # Required for OME-ZARR >= 0.3
                     {"name": "t", "type": "time", "unit": "second"},
                     {"name": "c", "type": "channel"},
@@ -509,10 +552,7 @@ class Stitcher:
                     {"name": "y", "type": "space", "unit": "micrometer"},
                     {"name": "x", "type": "space", "unit": "micrometer"},
                 ],
-                coordinate_transformations=transforms,
-                storage_options=storage_opts,
                 name=f"{region}_t{timepoint}",
-                fmt=ome_zarr.format.CurrentFormat(),
             )
 
         # Add complete OMERO metadata for visualization
@@ -987,14 +1027,14 @@ class Stitcher:
 
                 stitched_region = self.stitch_region(timepoint, region)
                 with debug_timing("rechunking"):
-                    if isinstance(stitched_region, da.Array):
-                        dask_stitched_region = stitched_region
-                    else:
+                    if isinstance(stitched_region, np.ndarray):
                         dask_stitched_region = da.from_array(
                             stitched_region,
                             chunks=self.computed_parameters.chunks,
                             name=f"stitched:t={timepoint},r={region}",
                         )
+                    else:
+                        dask_stitched_region = stitched_region
 
                 # Save the region
                 self.callbacks.starting_saving(False)
