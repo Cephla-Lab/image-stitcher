@@ -156,30 +156,6 @@ class Stitcher:
                 dimension_separator="/",
             )
 
-    def get_tile(
-        self, t: int, region: str, x: float, y: float, channel: str, z_level: int
-    ) -> da.Array | None:
-        """Get a specific tile using standardized data access."""
-        region_metadata = self.computed_parameters.get_region_metadata(t, region)
-
-        for value in region_metadata.values():
-            if (
-                value.x == x
-                and value.y == y
-                and value.channel == channel
-                and value.z_level == z_level
-            ):
-                try:
-                    return cast(da.Array, dask_imread(value.filepath)[0])
-                except FileNotFoundError:
-                    logging.warning(f"Warning: Tile file not found: {value.filepath}")
-                    return None
-
-        logging.warning(
-            f"Warning: No matching tile found for region {region}, x={x}, y={y}, channel={channel}, z={z_level}"
-        )
-        return None
-
     def place_tile(
         self,
         stitched_region: AnyArray,
