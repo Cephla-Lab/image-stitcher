@@ -9,5 +9,6 @@
   "scan_pattern": "Unidirectional",
   "merge_timepoints": false,
   "merge_hcs_regions": false,
-  "verbose": false
+  "verbose": false,
+  "force_stitch_to_disk": false
 }
