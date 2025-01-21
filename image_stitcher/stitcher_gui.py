@@ -9,6 +9,7 @@ from PyQt5.QtCore import QThread
 from PyQt5.QtCore import pyqtSignal as Signal
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QLabel,
@@ -16,6 +17,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -75,9 +77,32 @@ class StitchingGUI(QWidget):
         self.layout.addWidget(self.inputDirectoryBtn)  # type: ignore
 
         # Output format combo box (full width)
-        self.outputFormatCombo = QComboBox()
+        self.outputFormatCombo = QComboBox(self)
         self.outputFormatCombo.addItems(["OME-ZARR", "OME-TIFF"])
+        self.outputFormatCombo.currentTextChanged.connect(self.onFormatChange)
         self.layout.addWidget(self.outputFormatCombo)  # type: ignore
+
+        self.compressionLabel = QLabel("Output compression", self)
+        self.layout.addWidget(self.compressionLabel)
+        self.outputCompression = QComboBox(self)
+        self.outputCompression.addItems(["default", "none"])
+        self.layout.addWidget(self.outputCompression)  # type: ignore
+
+        self.pyramidCheckbox = QCheckBox("Infer levels for output image pyramid", self)
+        self.pyramidCheckbox.setChecked(True)
+        self.pyramidCheckbox.toggled.connect(self.onPyramidChange)
+        self.layout.addWidget(self.pyramidCheckbox)
+
+        self.pyramidLabel = QLabel(
+            "Number of output levels for the image pyramid", self
+        )
+        self.layout.addWidget(self.pyramidLabel)
+        self.pyramidLabel.hide()
+        self.pyramidLevels = QSpinBox(self)
+        self.pyramidLevels.setMaximum(32)
+        self.pyramidLevels.setMinimum(1)
+        self.layout.addWidget(self.pyramidLevels)
+        self.pyramidLevels.hide()
 
         # Status label
         self.statusLabel = QLabel("Status: Ready", self)
@@ -106,6 +131,7 @@ class StitchingGUI(QWidget):
         self.viewBtn.setEnabled(False)
         self.layout.addWidget(self.viewBtn)  # type: ignore
 
+        self.layout.insertStretch(-1, 1)  # type: ignore
         self.setWindowTitle("Cephla Image Stitcher")
         self.setGeometry(300, 300, 500, 300)
         self.show()
@@ -141,6 +167,11 @@ class StitchingGUI(QWidget):
                 scan_pattern=ScanPattern.unidirectional,
             )
 
+            if self.outputFormatCombo.currentText() == "OME-ZARR":
+                if not self.pyramidCheckbox.isChecked():
+                    params.num_pyramid_levels = self.pyramidLevels.value()
+                params.output_compression = self.outputCompression.currentText()
+
             self.stitcher = StitcherThread(
                 Stitcher(
                     params,
@@ -163,6 +194,31 @@ class StitchingGUI(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Stitching Error", str(e))
             self.statusLabel.setText("Status: Error Encountered")
+
+    def onFormatChange(self, format: str) -> None:
+        if format == "OME-ZARR":
+            self.pyramidCheckbox.show()
+            self.compressionLabel.show()
+            self.outputCompression.show()
+            if not self.pyramidCheckbox.isChecked():
+                self.pyramidLabel.show()
+                self.pyramidLevels.show()
+
+        else:
+            assert format == "OME-TIFF"
+            self.compressionLabel.hide()
+            self.outputCompression.hide()
+            self.pyramidCheckbox.hide()
+            self.pyramidLabel.hide()
+            self.pyramidLevels.hide()
+
+    def onPyramidChange(self, checked: bool) -> None:
+        if checked:
+            self.pyramidLevels.hide()
+            self.pyramidLabel.hide()
+        else:
+            self.pyramidLabel.show()
+            self.pyramidLevels.show()
 
     def setupConnections(self) -> None:
         assert self.stitcher is not None
