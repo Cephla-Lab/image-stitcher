@@ -70,6 +70,13 @@ class StitchingParameters(
     usage as low as possible, at the cost of some processing speed.
     """
 
+    num_pyramid_levels: int | None = None
+    """Total number of pyramid levels (including the full-resolution one) in the output.
+
+    Ignored if not writing to ome-zarr as the output format. The default, `None`
+    means we infer the number of output levels based on the size of the input images.
+    """
+
     def model_post_init(self, __context: Any) -> None:
         """Validate and process parameters after initialization."""
         self.input_folder = os.path.abspath(self.input_folder)
@@ -493,17 +500,25 @@ class StitchingComputedParameters:
         width_pixels = int(np.ceil(width_mm * 1000 / self.pixel_size_um))
         height_pixels = int(np.ceil(height_mm * 1000 / self.pixel_size_um))
 
-        # Calculate pyramid levels based on dimensions and number of regions
-        if len(self.regions) > 1:
-            rows, columns = self.get_rows_and_columns()
-            max_dimension = max(len(rows), len(columns))
+        # Calculate pyramid levels based on dimensions and number of regions.
+        if (
+            self.parent.num_pyramid_levels is not None
+            and self.parent.num_pyramid_levels > 0
+        ):
+            self.num_pyramid_levels = self.parent.num_pyramid_levels
         else:
-            max_dimension = 1
+            if len(self.regions) > 1:
+                rows, columns = self.get_rows_and_columns()
+                max_dimension = max(len(rows), len(columns))
+            else:
+                max_dimension = 1
 
-        self.num_pyramid_levels = max(
-            1,
-            math.ceil(np.log2(max(width_pixels, height_pixels) / 1024 * max_dimension)),
-        )
+            self.num_pyramid_levels = max(
+                1,
+                math.ceil(
+                    np.log2(max(width_pixels, height_pixels) / 1024 * max_dimension)
+                ),
+            )
 
         return ImagePlaneDims(width_px=width_pixels, height_px=height_pixels)
 
