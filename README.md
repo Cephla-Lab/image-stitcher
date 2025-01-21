@@ -1,17 +1,32 @@
 # image-stitcher
 
-## Setup
+## Run the GUI
+
+On linux (e.g. ubuntu), ensure you have the necessary system dependencies
+installed. We provide a setup script for ubuntu 22.04 LTS that does this
+automatically:
+
+```
+./setup_ubuntu_22_04.sh
+```
+for other distributions / versions, the exact packages may be slightly
+different.
+
+On mac OS, make sure you have `curl` installed (e.g. `brew install curl`) if
+you don't already.
+
+Then either double click the `run_gui` script or from this repository's directory run:
+```
+./run_gui
+```
+(this will install [`uv`](https://docs.astral.sh/uv/) if you don't already have
+it to automatically fetch and install python dependencies for your platform)
+
+## CLI / developer setup
 
 This repository uses [uv](https://docs.astral.sh/uv/) to manage its environment and dependencies.
 If you don't already have it, install from
-https://docs.astral.sh/uv/getting-started/installation/.
-
-## Devtools
-
-This repository is set up with [ruff](https://docs.astral.sh/ruff/) for linting
-and formatting, and [mypy](https://mypy.readthedocs.io) for type checking. The
-shell scripts in the dev directory can be used to invoke these tools and should
-be run from the repository root.
+https://docs.astral.sh/uv/getting-started/installation/ or run the `dev/ensure_uv.sh` script.
 
 ## Running via the CLI
 
@@ -22,7 +37,14 @@ uv run python -m image_stitcher.stitcher_cli --help
 ```
 to see the options and their documentation.
 
-## Running the GUI
+## Devtools
+
+This repository is set up with [ruff](https://docs.astral.sh/ruff/) for linting
+and formatting, and [mypy](https://mypy.readthedocs.io) for type checking. The
+shell scripts in the dev directory can be used to invoke these tools and should
+be run from the repository root.
+
+## Running the GUI manually
 
 ```
 uv run --extra gui python -m image_stitcher.stitcher_gui
