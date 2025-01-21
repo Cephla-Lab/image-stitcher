@@ -372,7 +372,7 @@ class Stitcher:
         # Configure storage options with optimal chunking
         storage_opts = {
             "chunks": self.computed_parameters.chunks,
-            "compressor": zarr.storage.default_compressor,
+            "compressor": self.params.output_compression,
         }
 
         if isinstance(stitched_region, zarr.Array):

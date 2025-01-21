@@ -6,7 +6,7 @@ import os
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any, ClassVar, NamedTuple, assert_never
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, assert_never
 
 import numpy as np
 import pandas as pd
@@ -75,6 +75,14 @@ class StitchingParameters(
 
     Ignored if not writing to ome-zarr as the output format. The default, `None`
     means we infer the number of output levels based on the size of the input images.
+    """
+
+    output_compression: Literal["default", "none"] = "default"
+    """Override the compression for the output zarr array.
+
+    (Ignored unless the output type is ome-zarr.) Currently the only options are
+    "none" for uncompressed output and "default" to use the zarr library's
+    default compression algorithm.
     """
 
     def model_post_init(self, __context: Any) -> None:
