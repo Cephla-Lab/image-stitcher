@@ -115,6 +115,5 @@ def temporary_image_directory_params(
         if disk_based_output_arr:
             base_params.force_stitch_to_disk = True
         base_params.input_folder = str(base_dir)
-        base_params.use_registration = False
         computed = StitchingComputedParameters(base_params)
         yield computed

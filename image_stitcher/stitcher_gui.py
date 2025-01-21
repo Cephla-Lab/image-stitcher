@@ -5,21 +5,17 @@ from typing import Any, cast
 import napari
 import numpy as np
 from napari.utils.colormaps import AVAILABLE_COLORMAPS, Colormap
-from PyQt5.QtCore import Qt, QThread
+from PyQt5.QtCore import QThread
 from PyQt5.QtCore import pyqtSignal as Signal
 from PyQt5.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QFileDialog,
-    QGridLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -78,48 +74,6 @@ class StitchingGUI(QWidget):
         self.inputDirectoryBtn.clicked.connect(self.selectInputDirectory)
         self.layout.addWidget(self.inputDirectoryBtn)  # type: ignore
 
-        # Create a horizontal layout for checkboxes and registration inputs
-        _ = QHBoxLayout()
-
-        # Left side: Checkboxes
-        grid = QGridLayout()
-
-        self.applyFlatfieldCheck = QCheckBox("Flatfield Correction", self)
-        grid.addWidget(self.applyFlatfieldCheck, 0, 0)
-
-        self.useRegistrationCheck = QCheckBox("Cross-Correlation Registration", self)
-        self.useRegistrationCheck.toggled.connect(self.onRegistrationCheck)
-        grid.addWidget(self.useRegistrationCheck, 1, 0)
-
-        self.mergeTimepointsCheck = QCheckBox(
-            "Merge Timepoints", self
-        )  # MERGE_TIMEPOINTS
-        self.mergeTimepointsCheck.setChecked(False)  # Default to False
-        grid.addWidget(self.mergeTimepointsCheck, 2, 0)
-
-        self.mergeRegionsCheck = QCheckBox(
-            "Merge HCS Regions", self
-        )  # STITCH_COMPLETE_ACQUISITION
-        self.mergeRegionsCheck.setChecked(False)  # Default to False
-        grid.addWidget(self.mergeRegionsCheck, 3, 0)
-
-        # Right side: Registration inputs
-        self.channelLabel = QLabel("Registration Channel", self)
-        self.channelLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
-        self.channelCombo = QComboBox(self)
-        grid.addWidget(self.channelLabel, 0, 2)
-        grid.addWidget(self.channelCombo, 0, 3)
-
-        self.zLevelLabel = QLabel("Registration Z-Level", self)
-        self.zLevelLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
-        self.zLevelInput = QSpinBox(self)
-        self.zLevelInput.setMinimum(0)
-        self.zLevelInput.setMaximum(100)
-        grid.addWidget(self.zLevelLabel, 1, 2)
-        grid.addWidget(self.zLevelInput, 1, 3)
-
-        self.layout.addLayout(grid)  # type: ignore
-
         # Output format combo box (full width)
         self.outputFormatCombo = QComboBox()
         self.outputFormatCombo.addItems(["OME-ZARR", "OME-TIFF"])
@@ -157,71 +111,12 @@ class StitchingGUI(QWidget):
         self.setGeometry(300, 300, 500, 300)
         self.show()
 
-        # Initially hide registration inputs
-        self.zLevelLabel.hide()
-        self.zLevelInput.hide()
-        self.channelLabel.hide()
-        self.channelCombo.hide()
-
     def selectInputDirectory(self) -> None:
         self.inputDirectory = QFileDialog.getExistingDirectory(
             self, "Select Input Image Folder"
         )
         if self.inputDirectory:
             self.inputDirectoryBtn.setText(f"Selected: {self.inputDirectory}")
-            self.onRegistrationCheck(self.useRegistrationCheck.isChecked())
-
-    def onRegistrationCheck(self, checked: Any) -> None:
-        """Handle registration checkbox state change."""
-        self.zLevelLabel.setVisible(checked)
-        self.zLevelInput.setVisible(checked)
-        self.channelLabel.setVisible(checked)
-        self.channelCombo.setVisible(checked)
-
-        if checked:
-            if not self.inputDirectory:
-                QMessageBox.warning(
-                    self, "Input Error", "Please Select an Input Image Folder First"
-                )
-                self.useRegistrationCheck.setChecked(False)
-                return
-
-            try:
-                # Create temporary params with minimal required parameters
-                temp_params = StitchingParameters(input_folder=self.inputDirectory)
-
-                # Create temporary Stitcher to parse filenames
-                stitcher = Stitcher(temp_params)
-                timepoints = stitcher.computed_parameters.timepoints
-
-                if not timepoints:
-                    QMessageBox.warning(
-                        self,
-                        "Input Error",
-                        "No time points found in the selected directory.",
-                    )
-                    self.useRegistrationCheck.setChecked(False)
-                    return
-
-                # Setup Z-Level
-                self.zLevelInput.setMinimum(0)
-                self.zLevelInput.setMaximum(stitcher.computed_parameters.num_z - 1)
-
-                # Setup channel dropdown
-                self.channelCombo.clear()
-                self.channelCombo.addItems(stitcher.computed_parameters.channel_names)
-
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Parsing Error",
-                    f"An error occurred during data processing: {e}",
-                )
-                self.useRegistrationCheck.setChecked(False)
-                self.zLevelLabel.hide()
-                self.zLevelInput.hide()
-                self.channelLabel.hide()
-                self.channelCombo.hide()
 
     def onStitchingStart(self) -> None:
         """Start stitching from GUI."""
@@ -244,17 +139,7 @@ class StitchingGUI(QWidget):
                 output_format=OutputFormat(
                     "." + self.outputFormatCombo.currentText().lower().replace("-", ".")
                 ),
-                apply_flatfield=self.applyFlatfieldCheck.isChecked(),
-                use_registration=self.useRegistrationCheck.isChecked(),
-                registration_channel=self.channelCombo.currentText()
-                if self.useRegistrationCheck.isChecked()
-                else None,
-                registration_z_level=self.zLevelInput.value()
-                if self.useRegistrationCheck.isChecked()
-                else 0,
                 scan_pattern=ScanPattern.unidirectional,
-                merge_timepoints=self.mergeTimepointsCheck.isChecked(),
-                merge_hcs_regions=self.mergeRegionsCheck.isChecked(),
             )
 
             self.stitcher = StitcherThread(

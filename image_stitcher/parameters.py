@@ -34,14 +34,6 @@ def input_path_exists(path: str) -> str:
     return path
 
 
-def z_non_negative(num: int) -> int:
-    """Pydantic validator that the z-level is >= 0."""
-    if num < 0:
-        raise ValueError("Registration Z-level must be non-negative")
-
-    return num
-
-
 class StitchingParameters(
     BaseModel,
     use_attribute_docstrings=True,
@@ -58,23 +50,6 @@ class StitchingParameters(
     output_format: OutputFormat = OutputFormat.ome_zarr
     """Output format for the stitched data."""
 
-    # Image processing options
-    apply_flatfield: bool = False
-    """Whether to apply a flatfield correction to the images prior to stitching."""
-
-    # Registration options
-    use_registration: bool = False
-    """Whether to register the images using their content, rather than based on x/y stage positions."""
-    registration_channel: str | None = None
-    """Channel name to use for registration. None -> first available channel."""
-    registration_z_level: Annotated[int, AfterValidator(z_non_negative)] = 0
-    """Z level to use for registration."""
-    dynamic_registration: bool = False
-    """Use dynamic registration for improved accuracy.
-
-    TODO(colin): describe what this actually does and when you would want to use it or not.
-    """
-
     # Scanning and stitching configuration
     scan_pattern: ScanPattern = ScanPattern.unidirectional
     """The scan pattern used for the acquisition.
@@ -82,12 +57,6 @@ class StitchingParameters(
     unidirectional means all rows go the same direction; S-pattern indicates every
     other row goes the other direction.
     """
-    merge_timepoints: bool = False
-    """Merge timepoints to create time series output."""
-
-    merge_hcs_regions: bool = False
-    """Merge HCS regions (wells) to create full wellplate HCS output."""
-
     verbose: bool = False
     """Show debug-level logging."""
 
@@ -255,8 +224,6 @@ class StitchingComputedParameters:
     timepoints: list[int] = field(init=False)
     monochrome_channels: list[str] = field(init=False)
     monochrome_colors: list[int] = field(init=False)
-    # TODO(colin): fill in correct type when importing the flatfield code.
-    flatfields: dict[None, None] = field(init=False)
     acquisition_metadata: dict[MetaKey, AcquisitionMetadata] = field(init=False)
     dtype: np.dtype = field(init=False)
     chunks: tuple[int, int, int, int, int] = field(init=False)
@@ -511,61 +478,20 @@ class StitchingComputedParameters:
         x_positions = self.x_positions
         y_positions = self.y_positions
 
-        if self.parent.use_registration:
-            # Calculate dimensions with registration shifts
-            num_cols = len(x_positions)
-            num_rows = len(y_positions)
+        # Calculate dimensions based on physical coordinates
+        width_mm = (
+            max(x_positions)
+            - min(x_positions)
+            + (self.input_width * self.pixel_size_um / 1000)
+        )
+        height_mm = (
+            max(y_positions)
+            - min(y_positions)
+            + (self.input_height * self.pixel_size_um / 1000)
+        )
 
-            # Handle different scanning patterns
-            if isinstance(self.scan_params, SPatternScanParams):
-                max_h_shift = (
-                    max(
-                        abs(self.scan_params.h_shift[0]),
-                        abs(self.scan_params.h_shift_rev[0]),
-                    ),
-                    max(
-                        abs(self.scan_params.h_shift[1]),
-                        abs(self.scan_params.h_shift_rev[1]),
-                    ),
-                )
-            else:
-                max_h_shift = (
-                    abs(self.scan_params.h_shift[0]),
-                    abs(self.scan_params.h_shift[1]),
-                )
-
-            # Calculate dimensions including overlaps and shifts
-            width_pixels = int(
-                self.input_width
-                + ((num_cols - 1) * (self.input_width - max_h_shift[1]))
-            )
-            width_pixels += abs(
-                (num_rows - 1) * self.scan_params.v_shift[1]
-            )  # Add horizontal shift from vertical registration
-
-            height_pixels = int(
-                self.input_height
-                + ((num_rows - 1) * (self.input_height - self.scan_params.v_shift[0]))
-            )
-            height_pixels += abs(
-                (num_cols - 1) * max_h_shift[0]
-            )  # Add vertical shift from horizontal registration
-
-        else:
-            # Calculate dimensions based on physical coordinates
-            width_mm = (
-                max(x_positions)
-                - min(x_positions)
-                + (self.input_width * self.pixel_size_um / 1000)
-            )
-            height_mm = (
-                max(y_positions)
-                - min(y_positions)
-                + (self.input_height * self.pixel_size_um / 1000)
-            )
-
-            width_pixels = int(np.ceil(width_mm * 1000 / self.pixel_size_um))
-            height_pixels = int(np.ceil(height_mm * 1000 / self.pixel_size_um))
+        width_pixels = int(np.ceil(width_mm * 1000 / self.pixel_size_um))
+        height_pixels = int(np.ceil(height_mm * 1000 / self.pixel_size_um))
 
         # Calculate pyramid levels based on dimensions and number of regions
         if len(self.regions) > 1:

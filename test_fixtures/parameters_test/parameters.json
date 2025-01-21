@@ -1,14 +1,7 @@
 {
   "input_folder": "/",
   "output_format": ".ome.zarr",
-  "apply_flatfield": false,
-  "use_registration": true,
-  "registration_channel": null,
-  "registration_z_level": 0,
-  "dynamic_registration": false,
   "scan_pattern": "Unidirectional",
-  "merge_timepoints": false,
-  "merge_hcs_regions": false,
   "verbose": false,
   "force_stitch_to_disk": false
 }
