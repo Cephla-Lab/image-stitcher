@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aicsimageio>=4.14.0",
+    "basicpy>=1.1.0",
     "dask-image>=2024.5.3",
     "numpy>=2.0.0",
     "ome-zarr>=0.10.3",

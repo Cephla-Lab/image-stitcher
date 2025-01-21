@@ -57,6 +57,10 @@ class StitchingParameters(
     unidirectional means all rows go the same direction; S-pattern indicates every
     other row goes the other direction.
     """
+
+    apply_flatfield: bool = False
+    """Whether to apply a flatfield correction to the images prior to stitching."""
+
     verbose: bool = False
     """Show debug-level logging."""
 
@@ -239,6 +243,7 @@ class StitchingComputedParameters:
     timepoints: list[int] = field(init=False)
     monochrome_channels: list[str] = field(init=False)
     monochrome_colors: list[int] = field(init=False)
+    flatfields: dict[int, np.ndarray] = field(init=False)
     acquisition_metadata: dict[MetaKey, AcquisitionMetadata] = field(init=False)
     dtype: np.dtype = field(init=False)
     chunks: tuple[int, int, int, int, int] = field(init=False)
