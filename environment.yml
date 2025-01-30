@@ -16,5 +16,8 @@ dependencies:
   - napari[all]
   - pyqt
   # NOTE: basicpy must be installed in your conda environment with pip.  Run the ./setup_ubuntu_22_04.sh script
-  # to handle this, or with your conda environment activated run pip install basicpy
+  # to handle this, or with your conda environment activated run pip install basicpy.  There is no basicpy
+  # package on conda-forge, and the installations instructions suggest pip:
+  #   https://basicpy.readthedocs.io/en/latest/installation.html
+  # The pip approach seems to handle the jax deps better as well.
   # - basicpy
