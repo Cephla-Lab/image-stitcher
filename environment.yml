@@ -1,0 +1,20 @@
+name: image-stitcher
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - aicsimageio
+  - dask-image
+  - numpy
+  - ome-zarr
+  - pandas
+  - psutil
+  - pydantic>=2.10.5
+  - pydantic-core>=2.27.2
+  - pydantic-settings>=2.7.1
+  - napari-ome-zarr
+  - napari[all]
+  - pyqt
+  # NOTE: basicpy must be installed in your conda environment with pip.  Run the ./setup_ubuntu_22_04.sh script
+  # to handle this, or with your conda environment activated run pip install basicpy
+  # - basicpy
