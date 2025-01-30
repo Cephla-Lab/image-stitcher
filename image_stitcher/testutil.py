@@ -46,7 +46,7 @@ def temporary_image_directory_params(
         - the coordinates CSV file
         - the acquisition params file
     """
-    with tempfile.TemporaryDirectory(delete=True) as d:
+    with tempfile.TemporaryDirectory() as d:
         base_dir = pathlib.Path(d) / name
         os.makedirs(base_dir / "0", exist_ok=True)
         coords_file = base_dir / "0" / "coordinates.csv"
