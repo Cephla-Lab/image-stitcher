@@ -24,8 +24,6 @@ Then either double click the `run_gui` script or from this repository's director
 ```
 ./run_gui
 ```
-(this will install [`uv`](https://docs.astral.sh/uv/) if you don't already have
-it to automatically fetch and install python dependencies for your platform)
 
 ## CLI / developer setup
 

@@ -4,4 +4,9 @@
 
 set -ex
 
-uv run ruff format .
+if ! which ruff > /dev/null 2>&1; then
+    echo "formatting requires the ruff tool, please install it."
+    exit 1
+fi
+
+ruff format .
