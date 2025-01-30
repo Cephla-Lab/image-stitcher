@@ -93,6 +93,10 @@ class StitchingGUI(QWidget):
         self.pyramidCheckbox.toggled.connect(self.onPyramidChange)
         self.layout.addWidget(self.pyramidCheckbox)  # type: ignore
 
+        self.flatfieldCorrectCheckbox = QCheckBox("Perform Flatfield Correction", self)
+        self.flatfieldCorrectCheckbox.setChecked(True)
+        self.layout.addWidget(self.flatfieldCorrectCheckbox)
+
         self.pyramidLabel = QLabel(
             "Number of output levels for the image pyramid", self
         )
@@ -165,6 +169,7 @@ class StitchingGUI(QWidget):
                     "." + self.outputFormatCombo.currentText().lower().replace("-", ".")
                 ),
                 scan_pattern=ScanPattern.unidirectional,
+                apply_flatfield=self.flatfieldCorrectCheckbox.isChecked()
             )
 
             if self.outputFormatCombo.currentText() == "OME-ZARR":
