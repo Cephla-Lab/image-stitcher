@@ -6,7 +6,7 @@ import os
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any, ClassVar, Literal, NamedTuple, assert_never
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -144,7 +144,7 @@ class ReverseRows(enum.Enum):
             case ReverseRows.odd:
                 return row_idx % 2 == 1
             case _ as unreachable:
-                assert_never(unreachable)
+                raise RuntimeError(unreachable)
 
 
 @dataclass
@@ -167,7 +167,7 @@ def default_scan_params(pattern: ScanPattern) -> ScanParams:
         case ScanPattern.s_pattern:
             return SPatternScanParams()
         case _ as unreachable:
-            assert_never(unreachable)
+            raise RuntimeError(unreachable)
 
 
 class MetaKey(NamedTuple):

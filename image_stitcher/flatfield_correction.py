@@ -38,7 +38,7 @@ def compute_flatfield_correction(
         channel_index = computed_params.monochrome_channels.index(channel_name)
         flatfields[channel_index] = basic.flatfield
         if progress_callback:
-            progress_callback(channel_index + 1, computed_params.num_c)
+            progress_callback()
 
     for channel in computed_params.channel_names:
         logging.info(f"Calculating {channel} flatfield...")

@@ -3,7 +3,7 @@ import logging
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Self, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 import dask.array as da
 import numpy as np
@@ -33,7 +33,7 @@ class ProgressCallbacks:
     finished_saving: Callable[[str, object], None]
 
     @classmethod
-    def no_op(cls) -> Self:
+    def no_op(cls):
         return cls(
             update_progress=lambda _a, _b: None,
             getting_flatfields=lambda: None,
