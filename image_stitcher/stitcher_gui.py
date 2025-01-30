@@ -169,7 +169,7 @@ class StitchingGUI(QWidget):
                     "." + self.outputFormatCombo.currentText().lower().replace("-", ".")
                 ),
                 scan_pattern=ScanPattern.unidirectional,
-                apply_flatfield=self.flatfieldCorrectCheckbox.isChecked()
+                apply_flatfield=self.flatfieldCorrectCheckbox.isChecked(),
             )
 
             if self.outputFormatCombo.currentText() == "OME-ZARR":
