@@ -4,4 +4,8 @@
 
 set -ex
 
-uv run ruff check --fix .
+if ! which ruff > /dev/null 2>&1; then
+    echo "autolint fixing requires the ruff tool, please install it."
+    exit 1
+fi
+ruff check --fix .

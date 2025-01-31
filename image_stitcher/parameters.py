@@ -6,7 +6,7 @@ import os
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any, ClassVar, Literal, NamedTuple, assert_never
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -57,6 +57,10 @@ class StitchingParameters(
     unidirectional means all rows go the same direction; S-pattern indicates every
     other row goes the other direction.
     """
+
+    apply_flatfield: bool = False
+    """Whether to apply a flatfield correction to the images prior to stitching."""
+
     verbose: bool = False
     """Show debug-level logging."""
 
@@ -140,7 +144,7 @@ class ReverseRows(enum.Enum):
             case ReverseRows.odd:
                 return row_idx % 2 == 1
             case _ as unreachable:
-                assert_never(unreachable)
+                raise RuntimeError(unreachable)
 
 
 @dataclass
@@ -163,7 +167,7 @@ def default_scan_params(pattern: ScanPattern) -> ScanParams:
         case ScanPattern.s_pattern:
             return SPatternScanParams()
         case _ as unreachable:
-            assert_never(unreachable)
+            raise RuntimeError(unreachable)
 
 
 class MetaKey(NamedTuple):
@@ -239,6 +243,7 @@ class StitchingComputedParameters:
     timepoints: list[int] = field(init=False)
     monochrome_channels: list[str] = field(init=False)
     monochrome_colors: list[int] = field(init=False)
+    flatfields: dict[int, np.ndarray] = field(init=False)
     acquisition_metadata: dict[MetaKey, AcquisitionMetadata] = field(init=False)
     dtype: np.dtype = field(init=False)
     chunks: tuple[int, int, int, int, int] = field(init=False)

@@ -2,7 +2,8 @@
 
 set -e
 
-cd -- "$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")"
+readonly script_dir="$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")"
 
-./dev/ensure_uv.sh
-/bin/bash -c 'uv run --extra gui python -m image_stitcher.stitcher_gui'
+cd -- "${script_dir}"
+
+python -m image_stitcher.stitcher_gui

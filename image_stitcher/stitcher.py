@@ -3,7 +3,7 @@ import logging
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Self, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 import dask.array as da
 import numpy as np
@@ -15,8 +15,8 @@ import zarr.storage
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter
 
-from image_stitcher.benchmarking_util import debug_timing
-
+from . import flatfield_correction
+from .benchmarking_util import debug_timing
 from .parameters import (
     OutputFormat,
     StitchingComputedParameters,
@@ -33,7 +33,7 @@ class ProgressCallbacks:
     finished_saving: Callable[[str, object], None]
 
     @classmethod
-    def no_op(cls) -> Self:
+    def no_op(cls):
         return cls(
             update_progress=lambda _a, _b: None,
             getting_flatfields=lambda: None,
@@ -179,6 +179,23 @@ class Stitcher:
         else:
             raise ValueError(f"Unexpected tile shape: {tile.shape}")
 
+    def apply_flatfield_correction(
+        self, tile: np.ndarray, channel_idx: int
+    ) -> np.ndarray:
+        """Apply a precomputed flatfield correction to an image tile."""
+        if channel_idx in self.computed_parameters.flatfields:
+            return (
+                (tile / self.computed_parameters.flatfields[channel_idx])
+                .clip(
+                    min=np.iinfo(self.computed_parameters.dtype).min,
+                    max=np.iinfo(self.computed_parameters.dtype).max,
+                )
+                .astype(self.computed_parameters.dtype)
+            )
+        else:
+            logging.warning(f"No flatfield correction found for channel #{channel_idx}")
+            return tile
+
     def place_single_channel_tile(
         self,
         stitched_region: AnyArray,
@@ -192,6 +209,8 @@ class Stitcher:
             raise ValueError(
                 f"Unexpected stitched_region shape: {stitched_region.shape}. Expected 5D array (t, c, z, y, x)."
             )
+        if self.params.apply_flatfield:
+            tile = self.apply_flatfield_correction(tile, channel_idx)
 
         # Calculate end points based on stitched_region shape
         y_end = min(y_pixel + tile.shape[0], stitched_region.shape[3])
@@ -474,6 +493,13 @@ class Stitcher:
         stime = time.time()
         # Initial setup
         self.paths.output_folder.mkdir(exist_ok=True, parents=True)
+
+        if self.params.apply_flatfield:
+            self.computed_parameters.flatfields = (
+                flatfield_correction.compute_flatfield_correction(
+                    self.computed_parameters, self.callbacks.getting_flatfields
+                )
+            )
 
         # Process each timepoint and region
         for timepoint in self.computed_parameters.timepoints:

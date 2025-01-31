@@ -4,4 +4,9 @@
 
 set -ex
 
-uv run mypy image_stitcher
+if ! which mypy > /dev/null 2>&1; then
+    echo "type checking requires the mypy tool, please install it."
+    exit 1
+fi
+
+mypy image_stitcher
