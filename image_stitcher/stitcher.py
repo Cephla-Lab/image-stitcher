@@ -480,12 +480,17 @@ class Stitcher:
         for level in range(1, num_levels):
             scale_factor = 2**level
             factors = {0: 1, 1: 1, 2: 1, 3: scale_factor, 4: scale_factor}
+
             # TODO/NOTE(colin): there are many possible ways to downscale an
             # image that are more or less appopriate for different usecases.
             # Expose the method as a parameter? (For example, np.mean is
             # inapproriate for binarized or labelled masks stored as normal images.)
             downsampled = da.coarsen(np.mean, image, factors, trim_excess=True)
-            pyramid.append(downsampled)
+
+            # TODO/NOTE(imo): Without re-chunking here, we'd get errors downstream because some operations
+            # want "regular chunks" (aka: all chunks the same size).  We use the same chunk size for all levels
+            # of the pyramid so that we're consistent across the board, but that isn't necessary.
+            pyramid.append(downsampled.rechunk(chunks=self.computed_parameters.chunks))
         return pyramid
 
     def run(self) -> None:
@@ -521,13 +526,18 @@ class Stitcher:
 
                 stitched_region = self.stitch_region(timepoint, region)
                 with debug_timing("rechunking"):
+                    chunk_shapes = self.computed_parameters.chunks
+                    logging.debug(f"Re-chunking to make region has {chunk_shapes} chunks.")
                     if isinstance(stitched_region, np.ndarray):
                         dask_stitched_region = da.from_array(
                             stitched_region,
-                            chunks=self.computed_parameters.chunks,
+                            chunks=chunk_shapes,
                             name=f"stitched:t={timepoint},r={region}",
                         )
+                    elif isinstance(stitched_region, da.Array):
+                        dask_stitched_region = stitched_region.rechunk(chunk_shapes)
                     else:
+                        # NOTE(imo): Do we need a separate Zarr re-chunk case here?
                         dask_stitched_region = stitched_region
 
                 # Save the region

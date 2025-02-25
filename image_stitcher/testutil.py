@@ -33,7 +33,7 @@ def temporary_image_directory_params(
     channel_names: list[str],
     name: str = "image_inputs",
     step_mm: tuple[float, float] = (3.2, 3.2),
-    sensor_pixel_size_µm: float = 7.52,
+    sensor_pixel_size_um: float = 7.52,
     magnification: float = 20.0,
     disk_based_output_arr: bool = False,
     pyramid_levels: Optional[int] = None
@@ -82,7 +82,7 @@ def temporary_image_directory_params(
                 )
                 for ch in channel_names:
                     im_file = base_dir / "0" / image_filename(fov_counter, ch)
-                    skimage.io.imsave(im_file, make_fake_image(fov_counter))
+                    skimage.io.imsave(im_file, make_fake_image(fov_counter), check_contrast=False)
                 fov_counter += 1
 
         coords = pd.DataFrame(coordinates)
@@ -105,7 +105,7 @@ def temporary_image_directory_params(
                 "tube_lens_f_mm": 180.0,
                 "name": "20x",
             },
-            "sensor_pixel_size_um": sensor_pixel_size_μm,
+            "sensor_pixel_size_um": sensor_pixel_size_um,
             "tube_lens_mm": 180,
         }
 
