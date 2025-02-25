@@ -4,7 +4,7 @@ import os
 import pathlib
 import tempfile
 from datetime import datetime, timezone
-from typing import Generator
+from typing import Generator, Optional
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,7 @@ def temporary_image_directory_params(
     sensor_pixel_size_µm: float = 7.52,
     magnification: float = 20.0,
     disk_based_output_arr: bool = False,
+    pyramid_levels: Optional[int] = None
 ) -> Generator[StitchingComputedParameters, None, None]:
     """Set up the files that the computed parameters requires for setup.
 
@@ -112,6 +113,8 @@ def temporary_image_directory_params(
             json.dump(acq_params, f)
 
         base_params = StitchingParameters.from_json_file(str(PARAMETERS_FIXTURE_FILE))
+        if pyramid_levels:
+            base_params.num_pyramid_levels = pyramid_levels
         if disk_based_output_arr:
             base_params.force_stitch_to_disk = True
         base_params.input_folder = str(base_dir)
