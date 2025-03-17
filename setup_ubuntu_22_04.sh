@@ -20,20 +20,24 @@ then
     wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O "${minoconda_installer}"
     bash "${minoconda_installer}" -b -u -p "${miniconda_install_dir}"
 
-    source "${miniconda_install_dir}/bin/activate"
-
     conda init --all
+    readonly miniconda_base_dir="$miniconda_install_dir"
+    echo "Using base environment location: '${miniconda_base_dir}'"
 else
-    echo "conda is already installed"
+    readonly miniconda_base_dir=$(conda info --base)
+    echo "Conda is already installed, using base environment location: '${miniconda_base_dir}'"
 fi
 
 cd -- "${script_dir}"
 
+# Make sure the conda base environment is active regardless of whether this was run
+# from a shell with a conda init already.
+source "${miniconda_base_dir}/bin/activate"
 conda env create --file environment.yml
 conda activate image-stitcher
 
 pip install basicpy
 
 echo "Setup successful, run the following in your shell to activate the conda environment:"
-echo "  source \"${miniconda_install_dir}/bin/activate\" && conda activate image-stitcher"
+echo "  source \"${miniconda_base_dir}/bin/activate\" && conda activate image-stitcher"
 echo " Then see the README.md for example usage."
