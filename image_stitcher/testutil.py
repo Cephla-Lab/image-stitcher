@@ -36,7 +36,8 @@ def temporary_image_directory_params(
     sensor_pixel_size_um: float = 7.52,
     magnification: float = 20.0,
     disk_based_output_arr: bool = False,
-    pyramid_levels: Optional[int] = None
+    pyramid_levels: Optional[int] = None,
+    flatfield_correction: bool = False
 ) -> Generator[StitchingComputedParameters, None, None]:
     """Set up the files that the computed parameters requires for setup.
 
@@ -117,6 +118,8 @@ def temporary_image_directory_params(
             base_params.num_pyramid_levels = pyramid_levels
         if disk_based_output_arr:
             base_params.force_stitch_to_disk = True
+        if flatfield_correction:
+            base_params.apply_flatfield = flatfield_correction
         base_params.input_folder = str(base_dir)
         computed = StitchingComputedParameters(base_params)
         yield computed
