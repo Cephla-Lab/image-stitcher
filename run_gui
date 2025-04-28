@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -6,4 +6,13 @@ readonly script_dir="$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")"
 
 cd -- "${script_dir}"
 
+# Setup conda, then activate the image-stitcher environment.  The image-sticher
+# environment should already exist from running the setup script.
+echo "Setting up conda..."
+eval "$(conda shell.bash hook)"
+
+echo "Activating the image-stitcher conda environment..."
+conda activate image-stitcher
+
+echo "Running the image stitcher gui..."
 python -m image_stitcher.stitcher_gui

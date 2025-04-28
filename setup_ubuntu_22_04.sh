@@ -20,7 +20,7 @@ then
     wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O "${minoconda_installer}"
     bash "${minoconda_installer}" -b -u -p "${miniconda_install_dir}"
 
-    conda init --all
+    $miniconda_install_dir/bin/conda init --all
     readonly miniconda_base_dir="$miniconda_install_dir"
     echo "Using base environment location: '${miniconda_base_dir}'"
 else
