@@ -1,6 +1,7 @@
 import logging
 import sys
 from typing import Any, cast
+import pathlib
 
 import napari
 import numpy as np
@@ -66,6 +67,7 @@ class StitchingGUI(QWidget):
         )
         self.output_path = ""
         self.dtype: np.dtype | None = None
+        self.flatfield_manifest: pathlib.Path | None = None
         self.initUI()
 
     def initUI(self) -> None:
@@ -93,9 +95,22 @@ class StitchingGUI(QWidget):
         self.pyramidCheckbox.toggled.connect(self.onPyramidChange)
         self.layout.addWidget(self.pyramidCheckbox)  # type: ignore
 
-        self.flatfieldCorrectCheckbox = QCheckBox("Perform Flatfield Correction", self)
-        self.flatfieldCorrectCheckbox.setChecked(True)
-        self.layout.addWidget(self.flatfieldCorrectCheckbox)
+        # --- Flatfield Correction Options ---
+        self.flatfieldModeCombo = QComboBox(self)
+        self.flatfieldModeCombo.addItems(
+            [
+                "No Flatfield Correction",
+                "Compute Flatfield Correction",
+                "Load Precomputed Flatfield",
+            ]
+        )
+        self.flatfieldModeCombo.currentIndexChanged.connect(self.onFlatfieldModeChanged)
+        self.layout.addWidget(self.flatfieldModeCombo)
+
+        self.loadFlatfieldBtn = QPushButton("Select Flatfield Folder", self)
+        self.loadFlatfieldBtn.clicked.connect(self.onLoadFlatfield)
+        self.loadFlatfieldBtn.setVisible(False)
+        self.layout.addWidget(self.loadFlatfieldBtn)  # type: ignore
 
         self.pyramidLabel = QLabel(
             "Number of output levels for the image pyramid", self
@@ -163,13 +178,17 @@ class StitchingGUI(QWidget):
 
         try:
             # Create parameters from UI state
+            mode = self.flatfieldModeCombo.currentIndex()
+            apply_flatfield = mode in (1, 2)
+            flatfield_manifest = self.flatfield_manifest if mode == 2 else None
             params = StitchingParameters(
                 input_folder=self.inputDirectory,
                 output_format=OutputFormat(
                     "." + self.outputFormatCombo.currentText().lower().replace("-", ".")
                 ),
                 scan_pattern=ScanPattern.unidirectional,
-                apply_flatfield=self.flatfieldCorrectCheckbox.isChecked(),
+                apply_flatfield=apply_flatfield,
+                flatfield_manifest=flatfield_manifest,
             )
 
             if self.outputFormatCombo.currentText() == "OME-ZARR":
@@ -224,6 +243,24 @@ class StitchingGUI(QWidget):
         else:
             self.pyramidLabel.show()
             self.pyramidLevels.show()
+
+    def onFlatfieldModeChanged(self, idx: int) -> None:
+        self.loadFlatfieldBtn.setVisible(idx == 2)
+        if idx != 2:
+            self.flatfield_manifest = None
+            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
+        elif idx == 2 and self.flatfield_manifest:
+            self.loadFlatfieldBtn.setText(f"Loaded: {self.flatfield_manifest.name}")
+        else:
+            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
+
+    def onLoadFlatfield(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Select Flatfield Folder")
+        if directory:
+            self.flatfield_manifest = pathlib.Path(directory)
+            self.loadFlatfieldBtn.setText(f"Loaded: {self.flatfield_manifest.name}")
+        else:
+            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
 
     def setupConnections(self) -> None:
         assert self.stitcher is not None

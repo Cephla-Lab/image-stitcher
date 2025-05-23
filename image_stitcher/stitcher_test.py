@@ -19,7 +19,7 @@ class StitcherTest(unittest.TestCase):
             step_mm=(1.0, 1.0),
             sensor_pixel_size_um=20.0,
             magnification=20.0,
-            flatfield_correction=False
+            flatfield_correction=False,
         ) as params:
             output_filename = None
 
@@ -54,7 +54,7 @@ class StitcherTest(unittest.TestCase):
             step_mm=(1.0, 1.0),
             sensor_pixel_size_um=20.0,
             magnification=20.0,
-            flatfield_correction=True
+            flatfield_correction=True,
         ) as params:
             output_filename = None
 
@@ -116,15 +116,15 @@ class StitcherTest(unittest.TestCase):
 
     def test_stitch_with_pyramid_and_zarr_out(self) -> None:
         with temporary_image_directory_params(
-                n_rows=5,
-                n_cols=5,
-                # Exactly non-overlapping images aligned in a grid.
-                im_size=ImagePlaneDims(1000, 1000),
-                channel_names=["DAPI", "FITC", "TRITC"],
-                step_mm=(1.0, 1.0),
-                sensor_pixel_size_um=20.0,
-                magnification=20.0,
-                pyramid_levels=6
+            n_rows=5,
+            n_cols=5,
+            # Exactly non-overlapping images aligned in a grid.
+            im_size=ImagePlaneDims(1000, 1000),
+            channel_names=["DAPI", "FITC", "TRITC"],
+            step_mm=(1.0, 1.0),
+            sensor_pixel_size_um=20.0,
+            magnification=20.0,
+            pyramid_levels=6,
         ) as params:
             output_filename = None
 

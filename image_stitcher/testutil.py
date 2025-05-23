@@ -37,7 +37,7 @@ def temporary_image_directory_params(
     magnification: float = 20.0,
     disk_based_output_arr: bool = False,
     pyramid_levels: Optional[int] = None,
-    flatfield_correction: bool = False
+    flatfield_correction: bool = False,
 ) -> Generator[StitchingComputedParameters, None, None]:
     """Set up the files that the computed parameters requires for setup.
 
@@ -83,7 +83,9 @@ def temporary_image_directory_params(
                 )
                 for ch in channel_names:
                     im_file = base_dir / "0" / image_filename(fov_counter, ch)
-                    skimage.io.imsave(im_file, make_fake_image(fov_counter), check_contrast=False)
+                    skimage.io.imsave(
+                        im_file, make_fake_image(fov_counter), check_contrast=False
+                    )
                 fov_counter += 1
 
         coords = pd.DataFrame(coordinates)

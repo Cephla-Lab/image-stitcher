@@ -210,6 +210,11 @@ class Stitcher:
                 f"Unexpected stitched_region shape: {stitched_region.shape}. Expected 5D array (t, c, z, y, x)."
             )
         if self.params.apply_flatfield:
+            logging.debug(
+                "Loaded flatfield indices: %s",
+                list(self.computed_parameters.flatfields.keys()),
+            )
+            logging.debug("Applying flatfield to channel_idx: %s", channel_idx)
             tile = self.apply_flatfield_correction(tile, channel_idx)
 
         # Calculate end points based on stitched_region shape
@@ -500,11 +505,22 @@ class Stitcher:
         self.paths.output_folder.mkdir(exist_ok=True, parents=True)
 
         if self.params.apply_flatfield:
-            self.computed_parameters.flatfields = (
-                flatfield_correction.compute_flatfield_correction(
-                    self.computed_parameters, self.callbacks.getting_flatfields
+            # either load an existing manifest…
+            if self.params.flatfield_manifest:
+                from .flatfield_utils import load_flatfield_correction
+
+                self.computed_parameters.flatfields = load_flatfield_correction(
+                    self.params.flatfield_manifest,
+                    self.computed_parameters,
                 )
-            )
+            # …or compute afresh
+            else:
+                self.computed_parameters.flatfields = (
+                    flatfield_correction.compute_flatfield_correction(
+                        self.computed_parameters,
+                        self.callbacks.getting_flatfields,
+                    )
+                )
 
         # Process each timepoint and region
         for timepoint in self.computed_parameters.timepoints:
@@ -527,7 +543,9 @@ class Stitcher:
                 stitched_region = self.stitch_region(timepoint, region)
                 with debug_timing("rechunking"):
                     chunk_shapes = self.computed_parameters.chunks
-                    logging.debug(f"Re-chunking to make region has {chunk_shapes} chunks.")
+                    logging.debug(
+                        f"Re-chunking to make region has {chunk_shapes} chunks."
+                    )
                     if isinstance(stitched_region, np.ndarray):
                         dask_stitched_region = da.from_array(
                             stitched_region,

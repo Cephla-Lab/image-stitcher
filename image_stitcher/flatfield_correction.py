@@ -48,22 +48,25 @@ def compute_flatfield_correction(
             # We might have a ton of images for this time point.  We only want to select up to MAX_FLATFIELD_IMAGES
             # to use for flatfield correction.  To do this, load all the metadata and pick random tile infos
             # to use for this timepoint.
-            all_tile_infos.extend([
-                tile
-                for key, tile in computed_params.acquisition_metadata.items()
-                if tile.channel == channel and key.t == int(t)
-            ])
+            all_tile_infos.extend(
+                [
+                    tile
+                    for key, tile in computed_params.acquisition_metadata.items()
+                    if tile.channel == channel and key.t == int(t)
+                ]
+            )
 
         random.shuffle(all_tile_infos)
-        selected_tile_infos = all_tile_infos[: min(MAX_FLATFIELD_IMAGES, len(all_tile_infos))]
+        selected_tile_infos = all_tile_infos[
+            : min(MAX_FLATFIELD_IMAGES, len(all_tile_infos))
+        ]
 
         if len(selected_tile_infos) < len(all_tile_infos):
-            logging.warning(f"Limiting flatfield correction to {len(selected_tile_infos)} images instead of using all {len(all_tile_infos)}")
+            logging.warning(
+                f"Limiting flatfield correction to {len(selected_tile_infos)} images instead of using all {len(all_tile_infos)}"
+            )
 
-        images = [
-            imread(tile.filepath)
-            for tile in selected_tile_infos
-        ]
+        images = [imread(tile.filepath) for tile in selected_tile_infos]
 
         if not images:
             logging.warning(f"No images found for channel {channel} for any timepoint")
