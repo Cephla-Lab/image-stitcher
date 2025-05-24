@@ -97,6 +97,25 @@ class StitchingGUI(QWidget):
         self.flatfieldCorrectCheckbox.setChecked(True)
         self.layout.addWidget(self.flatfieldCorrectCheckbox)
 
+        # --- Z-Layer Selection Options ---
+        self.zLayerLabel = QLabel("Z-Layer Selection:", self)
+        self.layout.addWidget(self.zLayerLabel)  # type: ignore
+
+        self.zLayerModeCombo = QComboBox(self)
+        self.zLayerModeCombo.addItems(["Middle Layer", "All Layers", "Specific Layer"])
+        self.zLayerModeCombo.currentIndexChanged.connect(self.onZLayerModeChanged)
+        self.layout.addWidget(self.zLayerModeCombo)  # type: ignore
+
+        self.zLayerSpinLabel = QLabel("Select Z-Layer Index:", self)
+        self.zLayerSpinLabel.setVisible(False)
+        self.layout.addWidget(self.zLayerSpinLabel)  # type: ignore
+
+        self.zLayerSpinBox = QSpinBox(self)
+        self.zLayerSpinBox.setMinimum(0)
+        self.zLayerSpinBox.setMaximum(999)  # Will be updated based on actual data
+        self.zLayerSpinBox.setVisible(False)
+        self.layout.addWidget(self.zLayerSpinBox)  # type: ignore
+
         self.pyramidLabel = QLabel(
             "Number of output levels for the image pyramid", self
         )
@@ -147,6 +166,37 @@ class StitchingGUI(QWidget):
         if self.inputDirectory:
             self.inputDirectoryBtn.setText(f"Selected: {self.inputDirectory}")
 
+            # Try to probe the dataset to get number of z-layers
+            try:
+                # Create temporary parameters to probe the dataset
+                temp_params = StitchingParameters(
+                    input_folder=self.inputDirectory,
+                    output_format=OutputFormat.ome_zarr,  # Doesn't matter for probing
+                    scan_pattern=ScanPattern.unidirectional,
+                )
+                temp_stitcher = Stitcher(temp_params)
+                num_z = temp_stitcher.computed_parameters.num_z
+
+                # Update the z-layer spinbox range
+                self.zLayerSpinBox.setMaximum(num_z - 1)
+                self.zLayerSpinLabel.setText(f"Select Z-Layer Index (0-{num_z - 1}):")
+
+                # If middle layer is selected, show which layer that would be
+                if self.zLayerModeCombo.currentIndex() == 0:  # Middle Layer
+                    middle_idx = num_z // 2
+                    self.zLayerLabel.setText(
+                        f"Z-Layer Selection (total layers: {num_z}, middle: {middle_idx}):"
+                    )
+                else:
+                    self.zLayerLabel.setText(
+                        f"Z-Layer Selection (total layers: {num_z}):"
+                    )
+
+            except Exception as e:
+                # If we can't probe the dataset, just show the error and continue
+                logging.warning(f"Could not probe dataset for z-layers: {e}")
+                self.zLayerLabel.setText("Z-Layer Selection:")
+
     def onStitchingStart(self) -> None:
         """Start stitching from GUI."""
         if not self.inputDirectory:
@@ -162,7 +212,15 @@ class StitchingGUI(QWidget):
         #                        "These operations will be skipped.")
 
         try:
-            # Create parameters from UI state
+            # Determine z-layer selection strategy
+            z_layer_mode = self.zLayerModeCombo.currentIndex()
+            if z_layer_mode == 0:  # Middle Layer
+                z_layer_selection = "middle"
+            elif z_layer_mode == 1:  # All Layers
+                z_layer_selection = "all"
+            else:  # Specific Layer
+                z_layer_selection = str(self.zLayerSpinBox.value())
+
             params = StitchingParameters(
                 input_folder=self.inputDirectory,
                 output_format=OutputFormat(
@@ -170,6 +228,7 @@ class StitchingGUI(QWidget):
                 ),
                 scan_pattern=ScanPattern.unidirectional,
                 apply_flatfield=self.flatfieldCorrectCheckbox.isChecked(),
+                z_layer_selection=z_layer_selection,
             )
 
             if self.outputFormatCombo.currentText() == "OME-ZARR":
@@ -224,6 +283,16 @@ class StitchingGUI(QWidget):
         else:
             self.pyramidLabel.show()
             self.pyramidLevels.show()
+
+    def onZLayerModeChanged(self, idx: int) -> None:
+        """Handle z-layer mode selection changes."""
+        # Show/hide specific layer controls based on selection
+        if idx == 2:  # "Specific Layer" selected
+            self.zLayerSpinLabel.setVisible(True)
+            self.zLayerSpinBox.setVisible(True)
+        else:
+            self.zLayerSpinLabel.setVisible(False)
+            self.zLayerSpinBox.setVisible(False)
 
     def setupConnections(self) -> None:
         assert self.stitcher is not None

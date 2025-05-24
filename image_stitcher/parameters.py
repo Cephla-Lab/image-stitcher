@@ -58,6 +58,17 @@ class StitchingParameters(
     other row goes the other direction.
     """
 
+    z_layer_selection: str = "middle"
+    """Strategy for selecting z-layers to stitch.
+    
+    Options:
+    - "all": Stitch all z-layers
+    - "middle": Stitch only the middle z-layer from the stack (default)
+    - A number (e.g., "2"): Stitch a specific z-layer by index
+    
+    Future options could include "max_intensity", "user_selected", etc.
+    """
+
     apply_flatfield: bool = False
     """Whether to apply a flatfield correction to the images prior to stitching."""
 

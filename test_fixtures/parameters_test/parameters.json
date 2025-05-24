@@ -2,6 +2,7 @@
   "input_folder": "/",
   "output_format": ".ome.zarr",
   "scan_pattern": "Unidirectional",
+  "z_layer_selection": "middle",
   "apply_flatfield": false,
   "verbose": false,
   "force_stitch_to_disk": false,

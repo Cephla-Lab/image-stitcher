@@ -22,6 +22,7 @@ from .parameters import (
     StitchingComputedParameters,
     StitchingParameters,
 )
+from .z_layer_selection import create_z_layer_selector, filter_metadata_by_z_layers
 
 
 @dataclass
@@ -83,15 +84,22 @@ class Stitcher:
             self._paths = Paths(self.params.stitched_folder, self.params.output_format)
         return self._paths
 
-    def create_output_array(self, timepoint: int, region: str) -> AnyArray:
+    def create_output_array(
+        self, timepoint: int, region: str, num_z_layers: int | None = None
+    ) -> AnyArray:
         width, height = self.computed_parameters.calculate_output_dimensions(
             timepoint, region
         )
+        # Use provided num_z_layers or fall back to all z-layers
+        z_dimension = (
+            num_z_layers if num_z_layers is not None else self.computed_parameters.num_z
+        )
+
         # create zeros with the right shape/dtype per timepoint per region
         output_shape = (
             1,
             self.computed_parameters.num_c,
-            self.computed_parameters.num_z,
+            z_dimension,
             height,
             width,
         )
@@ -243,7 +251,32 @@ class Stitcher:
         region_metadata = self.computed_parameters.get_region_metadata(
             int(timepoint), region
         )
-        stitched_region = self.create_output_array(timepoint, region)
+
+        # Apply z-layer selection if not stitching all layers
+        selected_z_layers = None
+        z_index_map = {}
+        if self.params.z_layer_selection != "all":
+            z_selector = create_z_layer_selector(self.params.z_layer_selection)
+            selected_z_layers = z_selector.select_z_layers(
+                region_metadata, self.computed_parameters.num_z
+            )
+            region_metadata = filter_metadata_by_z_layers(
+                region_metadata, selected_z_layers
+            )
+            # Create mapping from original z-indices to new indices in output array
+            z_index_map = {z: i for i, z in enumerate(selected_z_layers)}
+            logging.info(
+                f"Using z-layer selection strategy '{z_selector.get_name()}': "
+                f"selected layers {selected_z_layers}"
+            )
+
+        # Create output array with appropriate z-dimension
+        num_z_output = (
+            len(selected_z_layers)
+            if selected_z_layers
+            else self.computed_parameters.num_z
+        )
+        stitched_region = self.create_output_array(timepoint, region, num_z_output)
         x_min = min(self.computed_parameters.x_positions)
         y_min = min(self.computed_parameters.y_positions)
         total_tiles = len(region_metadata)
@@ -264,7 +297,14 @@ class Stitcher:
                 (tile_info.y - y_min) * 1000 / self.computed_parameters.pixel_size_um
             )
 
-            self.place_tile(stitched_region, tile, x_pixel, y_pixel, z_level, channel)
+            # Map z_level to output array index if using z-layer selection
+            output_z_level = (
+                z_index_map.get(z_level, z_level) if z_index_map else z_level
+            )
+
+            self.place_tile(
+                stitched_region, tile, x_pixel, y_pixel, output_z_level, channel
+            )
 
             self.callbacks.update_progress(processed_tiles, total_tiles)
             processed_tiles += 1
