@@ -83,6 +83,31 @@ class Stitcher:
             self._paths = Paths(self.params.stitched_folder, self.params.output_format)
         return self._paths
 
+    @staticmethod
+    def compute_mip(tiles: list[np.ndarray]) -> np.ndarray:
+        """Compute Maximum Intensity Projection from a list of z-stack tiles.
+        
+        Args:
+            tiles: List of 2D or 3D numpy arrays representing different z-levels
+            
+        Returns:
+            2D numpy array representing the MIP
+        """
+        if not tiles:
+            raise ValueError("Cannot compute MIP from empty tile list")
+        
+        # Stack all tiles along a new axis (z-axis)
+        if len(tiles[0].shape) == 2:
+            # 2D tiles (grayscale)
+            stacked = np.stack(tiles, axis=0)
+            return np.max(stacked, axis=0)
+        elif len(tiles[0].shape) == 3:
+            # 3D tiles (RGB or multi-channel)
+            stacked = np.stack(tiles, axis=0)
+            return np.max(stacked, axis=0)
+        else:
+            raise ValueError(f"Unexpected tile shape: {tiles[0].shape}")
+
     def create_output_array(self, timepoint: int, region: str) -> AnyArray:
         width, height = self.computed_parameters.calculate_output_dimensions(
             timepoint, region
@@ -257,22 +282,62 @@ class Stitcher:
             f"Beginning stitching of {total_tiles} tiles for region {region} timepoint {timepoint}"
         )
 
-        # Process each tile with progress tracking
-        for key, tile_info in region_metadata.items():
-            t, _, _, z_level, channel = key
-            tile = skimage.io.imread(tile_info.filepath)
+        if self.params.apply_mip:
+            logging.info(f"Applying Maximum Intensity Projection (MIP) to z-stacks")
+            # Group tiles by (t, region, fov_idx, channel) for MIP processing
+            tile_groups = {}
+            for key, tile_info in region_metadata.items():
+                t, region_name, fov_idx, z_level, channel = key
+                group_key = (t, region_name, fov_idx, channel)
+                if group_key not in tile_groups:
+                    tile_groups[group_key] = []
+                tile_groups[group_key].append((z_level, tile_info))
 
-            x_pixel = int(
-                (tile_info.x - x_min) * 1000 / self.computed_parameters.pixel_size_um
-            )
-            y_pixel = int(
-                (tile_info.y - y_min) * 1000 / self.computed_parameters.pixel_size_um
-            )
+            # Process each group with MIP
+            for group_key, z_tiles in tile_groups.items():
+                t, region_name, fov_idx, channel = group_key
+                
+                # Sort by z_level and load all tiles
+                z_tiles.sort(key=lambda x: x[0])
+                tiles = []
+                for z_level, tile_info in z_tiles:
+                    tile = skimage.io.imread(tile_info.filepath)
+                    tiles.append(tile)
+                
+                # Compute MIP
+                mip_tile = self.compute_mip(tiles)
+                
+                # Get position from the first tile in the group
+                first_tile_info = z_tiles[0][1]
+                x_pixel = int(
+                    (first_tile_info.x - x_min) * 1000 / self.computed_parameters.pixel_size_um
+                )
+                y_pixel = int(
+                    (first_tile_info.y - y_min) * 1000 / self.computed_parameters.pixel_size_um
+                )
 
-            self.place_tile(stitched_region, tile, x_pixel, y_pixel, z_level, channel)
+                # Place MIP tile at z_level=0 (since we only have 1 z-level in output)
+                self.place_tile(stitched_region, mip_tile, x_pixel, y_pixel, 0, channel)
 
-            self.callbacks.update_progress(processed_tiles, total_tiles)
-            processed_tiles += 1
+                self.callbacks.update_progress(processed_tiles, total_tiles)
+                processed_tiles += len(z_tiles)
+        else:
+            # Original processing logic for non-MIP case
+            for key, tile_info in region_metadata.items():
+                t, _, _, z_level, channel = key
+                tile = skimage.io.imread(tile_info.filepath)
+
+                x_pixel = int(
+                    (tile_info.x - x_min) * 1000 / self.computed_parameters.pixel_size_um
+                )
+                y_pixel = int(
+                    (tile_info.y - y_min) * 1000 / self.computed_parameters.pixel_size_um
+                )
+
+                self.place_tile(stitched_region, tile, x_pixel, y_pixel, z_level, channel)
+
+                self.callbacks.update_progress(processed_tiles, total_tiles)
+                processed_tiles += 1
 
         logging.info(
             f"Time to stitch region {region} timepoint {t}: {time.time() - start_time}"
