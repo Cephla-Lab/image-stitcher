@@ -97,6 +97,10 @@ class StitchingGUI(QWidget):
         self.flatfieldCorrectCheckbox.setChecked(True)
         self.layout.addWidget(self.flatfieldCorrectCheckbox)
 
+        self.mipCheckbox = QCheckBox("Apply Maximum Intensity Projection (MIP)", self)
+        self.mipCheckbox.setChecked(False)
+        self.layout.addWidget(self.mipCheckbox)
+
         self.pyramidLabel = QLabel(
             "Number of output levels for the image pyramid", self
         )
@@ -170,6 +174,7 @@ class StitchingGUI(QWidget):
                 ),
                 scan_pattern=ScanPattern.unidirectional,
                 apply_flatfield=self.flatfieldCorrectCheckbox.isChecked(),
+                apply_mip=self.mipCheckbox.isChecked(),
             )
 
             if self.outputFormatCombo.currentText() == "OME-ZARR":

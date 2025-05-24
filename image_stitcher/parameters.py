@@ -61,6 +61,9 @@ class StitchingParameters(
     apply_flatfield: bool = False
     """Whether to apply a flatfield correction to the images prior to stitching."""
 
+    apply_mip: bool = False
+    """Whether to apply Maximum Intensity Projection (MIP) to z-stacks before stitching."""
+
     verbose: bool = False
     """Show debug-level logging."""
 
@@ -384,6 +387,10 @@ class StitchingComputedParameters:
         self.num_t = len(self.timepoints)
         self.num_z = max_z + 1
         self.num_fovs_per_region = max_fov + 1
+
+        # When MIP is enabled, output will have only 1 z-level
+        if self.parent.apply_mip:
+            self.num_z = 1
 
         # Set up image parameters based on the first image
         first_meta = list(self.acquisition_metadata.values())[0]
