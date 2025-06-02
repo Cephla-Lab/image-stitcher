@@ -37,7 +37,8 @@ def temporary_image_directory_params(
     magnification: float = 20.0,
     disk_based_output_arr: bool = False,
     pyramid_levels: Optional[int] = None,
-    flatfield_correction: bool = False
+    flatfield_correction: bool = False,
+    num_z: int = 1
 ) -> Generator[StitchingComputedParameters, None, None]:
     """Set up the files that the computed parameters requires for setup.
 
@@ -54,13 +55,14 @@ def temporary_image_directory_params(
         coords_file = base_dir / "0" / "coordinates.csv"
         acq_params_file = base_dir / "acquisition parameters.json"
 
-        def image_filename(fov: int, channel: str) -> str:
+        def image_filename(fov: int, z_level: int, channel: str) -> str:
             mod_channel = channel.replace(" ", "_")
-            return f"R0_{fov}_0_{mod_channel}.tiff"
+            return f"R0_{fov}_{z_level}_{mod_channel}.tiff"
 
-        def make_fake_image(fov: int) -> np.ndarray:
+        def make_fake_image(fov: int, z_level: int) -> np.ndarray:
+            # Use both fov and z_level to create unique values for each image
             return np.ones((im_size.height_px, im_size.width_px), dtype=np.uint16) * (
-                fov % 65536
+                (fov * num_z + z_level) % 65536
             )
 
         step_x_mm, step_y_mm = step_mm
@@ -70,20 +72,21 @@ def temporary_image_directory_params(
             for c in range(n_cols):
                 x_pos = c * step_x_mm
                 y_pos = r * step_y_mm
-                coordinates.append(
-                    {
-                        "region": "R0",
-                        "fov": fov_counter,
-                        "z_level": 0,
-                        "x (mm)": x_pos,
-                        "y (mm)": y_pos,
-                        "z (um)": 0,
-                        "time": datetime.now(timezone.utc).strftime(DATETIME_FORMAT),
-                    }
-                )
-                for ch in channel_names:
-                    im_file = base_dir / "0" / image_filename(fov_counter, ch)
-                    skimage.io.imsave(im_file, make_fake_image(fov_counter), check_contrast=False)
+                for z_level in range(num_z):
+                    coordinates.append(
+                        {
+                            "region": "R0",
+                            "fov": fov_counter,
+                            "z_level": z_level,
+                            "x (mm)": x_pos,
+                            "y (mm)": y_pos,
+                            "z (um)": z_level * 1.5,  # 1.5um spacing between z-layers
+                            "time": datetime.now(timezone.utc).strftime(DATETIME_FORMAT),
+                        }
+                    )
+                    for ch in channel_names:
+                        im_file = base_dir / "0" / image_filename(fov_counter, z_level, ch)
+                        skimage.io.imsave(im_file, make_fake_image(fov_counter, z_level), check_contrast=False)
                 fov_counter += 1
 
         coords = pd.DataFrame(coordinates)
@@ -95,7 +98,7 @@ def temporary_image_directory_params(
             "dy(mm)": step_y_mm,
             "Ny": n_rows,
             "dz(um)": 1.5,
-            "Nz": 1,
+            "Nz": num_z,
             "dt(s)": 0.0,
             "Nt": 1,
             "with AF": False,

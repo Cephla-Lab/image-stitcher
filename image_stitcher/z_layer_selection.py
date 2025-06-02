@@ -6,11 +6,12 @@ from a z-stack acquisition.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Protocol
+from typing import Protocol, Union, TYPE_CHECKING
 
 import numpy as np
 
-from .parameters import MetaKey, AcquisitionMetadata
+if TYPE_CHECKING:
+    from .parameters import MetaKey, AcquisitionMetadata, ZLayerSelection
 
 
 class ZLayerSelector(ABC):
@@ -18,7 +19,7 @@ class ZLayerSelector(ABC):
 
     @abstractmethod
     def select_z_layers(
-        self, metadata: dict[MetaKey, AcquisitionMetadata], num_z: int
+        self, metadata: dict['MetaKey', 'AcquisitionMetadata'], num_z: int
     ) -> list[int]:
         """Select which z-layers to include in stitching.
 
@@ -41,7 +42,7 @@ class MiddleLayerSelector(ZLayerSelector):
     """Selects the middle z-layer from a stack."""
 
     def select_z_layers(
-        self, metadata: dict[MetaKey, AcquisitionMetadata], num_z: int
+        self, metadata: dict['MetaKey', 'AcquisitionMetadata'], num_z: int
     ) -> list[int]:
         """Select the middle z-layer.
 
@@ -69,7 +70,7 @@ class AllLayersSelector(ZLayerSelector):
     """Selects all z-layers (default behavior)."""
 
     def select_z_layers(
-        self, metadata: dict[MetaKey, AcquisitionMetadata], num_z: int
+        self, metadata: dict['MetaKey', 'AcquisitionMetadata'], num_z: int
     ) -> list[int]:
         """Select all z-layers.
 
@@ -98,7 +99,7 @@ class SpecificLayerSelector(ZLayerSelector):
         self.layer_index = layer_index
 
     def select_z_layers(
-        self, metadata: dict[MetaKey, AcquisitionMetadata], num_z: int
+        self, metadata: dict['MetaKey', 'AcquisitionMetadata'], num_z: int
     ) -> list[int]:
         """Select a specific z-layer by index.
 
@@ -128,8 +129,8 @@ class SpecificLayerSelector(ZLayerSelector):
 
 
 def filter_metadata_by_z_layers(
-    metadata: dict[MetaKey, AcquisitionMetadata], z_layers: list[int]
-) -> dict[MetaKey, AcquisitionMetadata]:
+    metadata: dict['MetaKey', 'AcquisitionMetadata'], z_layers: list[int]
+) -> dict['MetaKey', 'AcquisitionMetadata']:
     """Filter acquisition metadata to include only specified z-layers.
 
     Args:
@@ -148,13 +149,12 @@ def filter_metadata_by_z_layers(
     return filtered
 
 
-# Factory function for creating selectors
-def create_z_layer_selector(strategy: str = "middle") -> ZLayerSelector:
+def create_z_layer_selector(strategy: Union['ZLayerSelection', int, str]) -> ZLayerSelector:
     """Create a z-layer selector based on the specified strategy.
 
     Args:
-        strategy: Name of the selection strategy ("all", "middle") or a numeric string
-                 for specific layer selection (e.g., "0", "1", "2")
+        strategy: Name of the selection strategy (ZLayerSelection.ALL, ZLayerSelection.MIDDLE),
+                 a numeric index (int), or a string representation ("all", "middle", "0", "1", "2")
 
     Returns:
         ZLayerSelector instance
@@ -162,20 +162,34 @@ def create_z_layer_selector(strategy: str = "middle") -> ZLayerSelector:
     Raises:
         ValueError: If strategy is not recognized
     """
-    # Check if strategy is a numeric string
-    if strategy.isdigit():
-        layer_index = int(strategy)
-        return SpecificLayerSelector(layer_index)
+    # Import locally to avoid circular dependency at module load time
+    from .parameters import ZLayerSelection
 
-    strategies = {
-        "all": AllLayersSelector,
-        "middle": MiddleLayerSelector,
-    }
+    if isinstance(strategy, ZLayerSelection):
+        if strategy == ZLayerSelection.ALL:
+            return AllLayersSelector()
+        elif strategy == ZLayerSelection.MIDDLE:
+            return MiddleLayerSelector()
+        # Should not happen if enum is exhaustive
+        raise ValueError(f"Unhandled ZLayerSelection enum member: {strategy}")
+    elif isinstance(strategy, int):
+        return SpecificLayerSelector(strategy)
+    elif isinstance(strategy, str):
+        # Check if strategy is a numeric string
+        if strategy.isdigit():
+            layer_index = int(strategy)
+            return SpecificLayerSelector(layer_index)
 
-    if strategy not in strategies:
-        raise ValueError(
-            f"Unknown z-layer selection strategy: {strategy}. "
-            f"Available strategies: {list(strategies.keys())} or a numeric index"
-        )
+        strategies = {
+            "all": AllLayersSelector,
+            "middle": MiddleLayerSelector,
+        }
 
-    return strategies[strategy]()
+        if strategy not in strategies:
+            raise ValueError(
+                f"Unknown z-layer selection strategy: {strategy}. "
+                f"Available strategies: {list(strategies.keys())} or a numeric index, or ZLayerSelection enum"
+            )
+        return strategies[strategy]()
+    else:
+        raise TypeError(f"Invalid type for z-layer selection strategy: {type(strategy)}. Expected ZLayerSelection, int, or str.")
