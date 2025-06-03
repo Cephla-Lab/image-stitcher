@@ -97,12 +97,8 @@ class Stitcher:
             raise ValueError("Cannot compute MIP from empty tile list")
         
         # Stack all tiles along a new axis (z-axis)
-        if len(tiles[0].shape) == 2:
-            # 2D tiles (grayscale)
-            stacked = np.stack(tiles, axis=0)
-            return np.max(stacked, axis=0)
-        elif len(tiles[0].shape) == 3:
-            # 3D tiles (RGB or multi-channel)
+        if len(tiles[0].shape) in (2, 3):
+            # 2D (grayscale) or 3D (RGB/multi-channel) tiles
             stacked = np.stack(tiles, axis=0)
             return np.max(stacked, axis=0)
         else:
@@ -113,10 +109,11 @@ class Stitcher:
             timepoint, region
         )
         # create zeros with the right shape/dtype per timepoint per region
+        output_z_dim = 1 if self.params.apply_mip else self.computed_parameters.num_z
         output_shape = (
             1,
             self.computed_parameters.num_c,
-            self.computed_parameters.num_z,
+            output_z_dim,
             height,
             width,
         )
@@ -292,8 +289,8 @@ class Stitcher:
             for group_key, z_tiles in tile_groups.items():
                 t, region_name, fov_idx, channel = group_key
                 
-                # Sort by z_level and load all tiles
-                z_tiles.sort(key=lambda x: x[0])
+                # Load all tiles for the current FOV/channel group
+                # The order of tiles does not matter for compute_mip
                 tiles = []
                 for z_level, tile_info in z_tiles:
                     tile = skimage.io.imread(tile_info.filepath)

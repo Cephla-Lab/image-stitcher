@@ -388,9 +388,10 @@ class StitchingComputedParameters:
         self.num_z = max_z + 1
         self.num_fovs_per_region = max_fov + 1
 
-        # When MIP is enabled, output will have only 1 z-level
-        if self.parent.apply_mip:
-            self.num_z = 1
+        # When MIP is enabled, the number of input z-levels (self.num_z)
+        # remains the count of z-levels in the source data.
+        # The stitching process itself will handle producing a 1 z-level output
+        # if MIP is active.
 
         # Set up image parameters based on the first image
         first_meta = list(self.acquisition_metadata.values())[0]
