@@ -2,6 +2,7 @@ import logging
 import sys
 from typing import Any, cast
 import pathlib
+import enum
 
 import napari
 import numpy as np
@@ -25,6 +26,24 @@ from PyQt5.QtWidgets import (
 
 from .parameters import OutputFormat, ScanPattern, StitchingParameters
 from .stitcher import ProgressCallbacks, Stitcher
+
+# Enum for Flatfield Modes
+class FlatfieldModeOption(enum.Enum):
+    NONE = "No Flatfield Correction"
+    COMPUTE = "Compute Flatfield Correction"
+    LOAD = "Load Precomputed Flatfield"
+
+def get_flatfield_mode_from_string(combo_value: str) -> FlatfieldModeOption:
+    if combo_value == FlatfieldModeOption.NONE.value:
+        return FlatfieldModeOption.NONE
+    elif combo_value == FlatfieldModeOption.COMPUTE.value:
+        return FlatfieldModeOption.COMPUTE
+    elif combo_value == FlatfieldModeOption.LOAD.value:
+        return FlatfieldModeOption.LOAD
+    else:
+        # This case should ideally not be reached if combo box items are populated from the enum.
+        raise ValueError(f"Unknown flatfield mode string from combo box: '{combo_value}'")
+
 
 # TODO(colin): this is almost but not quite the same as the map in
 # StitchingComputedParameters.get_channel_color. Reconcile the differences?
@@ -98,16 +117,12 @@ class StitchingGUI(QWidget):
         # --- Flatfield Correction Options ---
         self.flatfieldModeCombo = QComboBox(self)
         self.flatfieldModeCombo.addItems(
-            [
-                "No Flatfield Correction",
-                "Compute Flatfield Correction",
-                "Load Precomputed Flatfield",
-            ]
+            [mode.value for mode in FlatfieldModeOption]
         )
         self.flatfieldModeCombo.currentIndexChanged.connect(self.onFlatfieldModeChanged)
         self.layout.addWidget(self.flatfieldModeCombo)
 
-        self.loadFlatfieldBtn = QPushButton("Select Flatfield Folder", self)
+        self.loadFlatfieldBtn = QPushButton("Select Flatfield Manifest File", self)
         self.loadFlatfieldBtn.clicked.connect(self.onLoadFlatfield)
         self.loadFlatfieldBtn.setVisible(False)
         self.layout.addWidget(self.loadFlatfieldBtn)  # type: ignore
@@ -170,17 +185,21 @@ class StitchingGUI(QWidget):
             )
             return
 
-        # # In StitchingGUI.onStitchingStart():
-        # if self.outputFormatCombo.currentText() == 'OME-TIFF' and (self.mergeTimepointsCheck.isChecked() or self.mergeRegionsCheck.isChecked()):
-        #     QMessageBox.warning(self, "Format Warning",
-        #                        "Merging operations are only supported for OME-ZARR format. "
-        #                        "These operations will be skipped.")
-
         try:
             # Create parameters from UI state
-            mode = self.flatfieldModeCombo.currentIndex()
-            apply_flatfield = mode in (1, 2)
-            flatfield_manifest = self.flatfield_manifest if mode == 2 else None
+            selected_flatfield_str = self.flatfieldModeCombo.currentText()
+            flatfield_mode_option = get_flatfield_mode_from_string(selected_flatfield_str)
+
+            apply_flatfield = flatfield_mode_option in (
+                FlatfieldModeOption.COMPUTE,
+                FlatfieldModeOption.LOAD,
+            )
+            flatfield_manifest_to_use = (
+                self.flatfield_manifest
+                if flatfield_mode_option == FlatfieldModeOption.LOAD
+                else None
+            )
+
             params = StitchingParameters(
                 input_folder=self.inputDirectory,
                 output_format=OutputFormat(
@@ -188,7 +207,7 @@ class StitchingGUI(QWidget):
                 ),
                 scan_pattern=ScanPattern.unidirectional,
                 apply_flatfield=apply_flatfield,
-                flatfield_manifest=flatfield_manifest,
+                flatfield_manifest=flatfield_manifest_to_use,
             )
 
             if self.outputFormatCombo.currentText() == "OME-ZARR":
@@ -245,22 +264,29 @@ class StitchingGUI(QWidget):
             self.pyramidLevels.show()
 
     def onFlatfieldModeChanged(self, idx: int) -> None:
-        self.loadFlatfieldBtn.setVisible(idx == 2)
-        if idx != 2:
+        selected_mode_str = self.flatfieldModeCombo.currentText()
+        flatfield_mode_option = get_flatfield_mode_from_string(selected_mode_str)
+
+        self.loadFlatfieldBtn.setVisible(flatfield_mode_option == FlatfieldModeOption.LOAD)
+        
+        if flatfield_mode_option != FlatfieldModeOption.LOAD:
             self.flatfield_manifest = None
-            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
-        elif idx == 2 and self.flatfield_manifest:
-            self.loadFlatfieldBtn.setText(f"Loaded: {self.flatfield_manifest.name}")
+            self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
+        elif self.flatfield_manifest:
+            self.loadFlatfieldBtn.setText(f"Selected: {self.flatfield_manifest.name}")
         else:
-            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
+            self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
 
     def onLoadFlatfield(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Flatfield Folder")
-        if directory:
-            self.flatfield_manifest = pathlib.Path(directory)
-            self.loadFlatfieldBtn.setText(f"Loaded: {self.flatfield_manifest.name}")
+        manifest_filepath_str, _ = QFileDialog.getOpenFileName(
+            self, "Select Flatfield Manifest File", "", "JSON files (*.json)"
+        )
+        if manifest_filepath_str:
+            self.flatfield_manifest = pathlib.Path(manifest_filepath_str)
+            self.loadFlatfieldBtn.setText(f"Selected: {self.flatfield_manifest.name}")
         else:
-            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
+            if not self.flatfield_manifest:
+                self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
 
     def setupConnections(self) -> None:
         assert self.stitcher is not None
@@ -342,12 +368,11 @@ class StitchingGUI(QWidget):
             logging.error(f"An error occurred while opening output in Napari: {e}")
 
     def extractWavelength(self, name: str) -> str | None:
-        # Split the string and find the wavelength number immediately after "Fluorescence"
         parts = name.split()
         if "Fluorescence" in parts:
             index = parts.index("Fluorescence") + 1
             if index < len(parts):
-                return parts[index].split()[0]  # Assuming '488 nm Ex' and taking '488'
+                return parts[index].split()[0]
         for color in ["R", "G", "B"]:
             if color in parts or "full_" + color in parts:
                 return color

@@ -210,10 +210,6 @@ class Stitcher:
                 f"Unexpected stitched_region shape: {stitched_region.shape}. Expected 5D array (t, c, z, y, x)."
             )
         if self.params.apply_flatfield:
-            logging.debug(
-                "Loaded flatfield indices: %s",
-                list(self.computed_parameters.flatfields.keys()),
-            )
             logging.debug("Applying flatfield to channel_idx: %s", channel_idx)
             tile = self.apply_flatfield_correction(tile, channel_idx)
 
@@ -520,6 +516,43 @@ class Stitcher:
                         self.computed_parameters,
                         self.callbacks.getting_flatfields,
                     )
+                )
+
+            # Validate loaded/computed flatfields
+            if self.computed_parameters.flatfields:
+                expected_shape = (
+                    self.computed_parameters.input_height,
+                    self.computed_parameters.input_width,
+                )
+                # Iterate over a copy of keys for safe removal during iteration
+                for ch_idx in list(self.computed_parameters.flatfields.keys()):
+                    ff_array = self.computed_parameters.flatfields[ch_idx]
+                    if not isinstance(ff_array, np.ndarray):
+                        logging.warning(
+                            f"Flatfield for channel index {ch_idx} is not a numpy array (type: {type(ff_array)}). "
+                            "This flatfield will not be used."
+                        )
+                        del self.computed_parameters.flatfields[ch_idx]
+                        continue # Skip to next flatfield
+
+                    if ff_array.ndim != 2 or ff_array.shape != expected_shape:
+                        logging.warning(
+                            f"Flatfield for channel index {ch_idx} has incorrect shape {ff_array.shape}. "
+                            f"Expected 2D array of shape {expected_shape}. "
+                            "This flatfield will not be used."
+                        )
+                        del self.computed_parameters.flatfields[ch_idx]
+                    # Optional: Add further checks like dtype or value range if necessary
+
+            # Log loaded/computed AND VALIDATED flatfield indices here
+            if self.computed_parameters.flatfields:
+                logging.debug(
+                    "Validated and using flatfields for channel indices: %s",
+                    list(self.computed_parameters.flatfields.keys()),
+                )
+            else:
+                logging.debug(
+                    "Flatfield application was enabled, but no valid flatfields were loaded, computed, or passed validation."
                 )
 
         # Process each timepoint and region

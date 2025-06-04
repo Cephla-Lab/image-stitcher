@@ -1,4 +1,8 @@
 import unittest
+import tempfile
+import pathlib
+import json
+import numpy as np
 
 from ome_zarr.io import parse_url
 from ome_zarr.reader import Reader
@@ -151,3 +155,67 @@ class StitcherTest(unittest.TestCase):
             self.assertEqual(im[0, 0, 0, 0, 1500].compute(), 1)
             self.assertEqual(im[0, 0, 0, 0, 2000].compute(), 2)
             self.assertEqual(im[0, 0, 0, 2999, 2999].compute(), 12)
+
+    def test_stitching_with_flatfield_manifest(self) -> None:
+        im_size = ImagePlaneDims(1000, 1000)
+        # Using 3 channels to match pixel assertions from test_basic_stage_stitching
+        channel_names = ["DAPI", "FITC", "TRITC"]
+
+        with tempfile.TemporaryDirectory() as temp_manifest_dir_str:
+            temp_manifest_dir = pathlib.Path(temp_manifest_dir_str)
+
+            # Create dummy .npy flatfield files (arrays of ones for no-op)
+            flatfield_files_data = {}
+            for ch_name in channel_names:
+                npy_filename = f"{ch_name}_flatfield.npy"
+                # Flatfield array should be float for division, ones for no-op
+                flatfield_array = np.ones((im_size.height_px, im_size.width_px), dtype=np.float32)
+                np.save(temp_manifest_dir / npy_filename, flatfield_array)
+                flatfield_files_data[ch_name] = npy_filename
+
+            # Create dummy flatfield_manifest.json
+            manifest_content = {"files": flatfield_files_data}
+            manifest_path = temp_manifest_dir / "flatfield_manifest.json"
+            with open(manifest_path, "w") as f_manifest:
+                json.dump(manifest_content, f_manifest)
+
+            with temporary_image_directory_params(
+                n_rows=3,
+                n_cols=3,
+                im_size=im_size,
+                channel_names=channel_names,
+                step_mm=(1.0, 1.0),
+                sensor_pixel_size_um=20.0,
+                magnification=20.0,
+                # flatfield_correction is False by default in temporary_image_directory_params
+                # We will set apply_flatfield and flatfield_manifest on the params directly
+            ) as computed_params:
+                # Configure StitchingParameters (parent of computed_params) to use the manifest
+                computed_params.parent.apply_flatfield = True
+                computed_params.parent.flatfield_manifest = manifest_path
+
+                output_filename = None
+
+                def finished_saving(output_path_str: str, _dtype: object) -> None:
+                    nonlocal output_filename
+                    output_filename = output_path_str
+
+                callbacks = ProgressCallbacks.no_op()
+                callbacks.finished_saving = finished_saving
+                # Stitcher expects StitchingParameters (computed_params.parent)
+                stitcher = Stitcher(computed_params.parent, callbacks)
+                stitcher.run()
+                self.assertIsNotNone(output_filename)
+
+                im = next(Reader(parse_url(output_filename))()).data[0]
+                # Assertions match test_basic_stage_stitching due to no-op flatfield
+                self.assertEqual(im.shape, (1, len(channel_names), 1, 3000, 3000))
+                # Pixel values are (fov % 65536)
+                self.assertEqual(im[0, 0, 0, 0, 0].compute(), 0)    # FOV 0
+                self.assertEqual(im[0, 0, 0, 1000, 0].compute(), 3) # FOV 3
+                self.assertEqual(im[0, 0, 0, 1500, 0].compute(), 3) # FOV 3
+                self.assertEqual(im[0, 0, 0, 2000, 0].compute(), 6) # FOV 6
+                self.assertEqual(im[0, 0, 0, 0, 1000].compute(), 1) # FOV 1
+                self.assertEqual(im[0, 0, 0, 0, 1500].compute(), 1) # FOV 1
+                self.assertEqual(im[0, 0, 0, 0, 2000].compute(), 2) # FOV 2
+                self.assertEqual(im[0, 0, 0, 2999, 2999].compute(), 8) # FOV 8
