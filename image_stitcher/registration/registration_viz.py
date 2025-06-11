@@ -9,13 +9,39 @@ import re
 import sys
 from typing import Union, Dict, List, Tuple
 
-# Add the src directory to the Python path when running as script
-if __name__ == "__main__":
-    src_dir = str(Path(__file__).parent.parent.parent)
-    if src_dir not in sys.path:
-        sys.path.append(src_dir)
+# Constants for file handling
+DEFAULT_FOV_RE = re.compile(r"(?P<region>\w+)_(?P<fov>0|[1-9]\d*)_(?P<z_level>\d+)_", re.I)
 
-from m2stitch.tile_registration import DEFAULT_FOV_RE, extract_tile_indices
+def extract_tile_indices(filenames: List[str], coords_df: pd.DataFrame) -> Tuple[List[int], List[int], Dict[str, int]]:
+    """Extract row and column indices for each tile from filenames.
+    
+    Parameters
+    ----------
+    filenames : List[str]
+        List of filenames
+    coords_df : pd.DataFrame
+        DataFrame containing coordinates
+        
+    Returns
+    -------
+    Tuple[List[int], List[int], Dict[str, int]]
+        Lists of row and column indices, and mapping from filename to index
+    """
+    rows = []
+    cols = []
+    filename_to_index = {}
+    
+    for i, filename in enumerate(filenames):
+        match = DEFAULT_FOV_RE.search(filename)
+        if match:
+            fov = int(match.group('fov'))
+            # Find the corresponding row in coords_df
+            coord_idx = coords_df[coords_df['fov'] == fov].index[0]
+            rows.append(coord_idx)
+            cols.append(i)  # Use the index as column number
+            filename_to_index[filename] = i
+    
+    return rows, cols, filename_to_index
 
 def create_registration_scatterplots(
     timepoint_dir: Path,
