@@ -538,10 +538,13 @@ def calculate_pixel_size_microns(
             if image_directory is None:
                 json_path = Path('acquisition parameters.json')
             else:
-                json_path = Path(image_directory).parent / 'acquisition parameters.json'
+                # The JSON file is always at the parent level of the image directory
+                json_path = Path(image_directory) / 'acquisition parameters.json'
             
             if not json_path.exists():
                 raise FileNotFoundError(f"Could not find acquisition parameters.json at {json_path}")
+            
+            print(f"Found acquisition parameters at: {json_path}")
             
             # Read the current JSON
             with open(json_path, 'r') as f:
@@ -1184,12 +1187,38 @@ def register_and_update_coordinates(
     csv_path = Path(csv_path)
     output_csv_path = Path(output_csv_path)
     
+    # Create original_coordinates directory if it doesn't exist
+    original_coords_dir = image_directory / "original_coordinates"
+    original_coords_dir.mkdir(exist_ok=True)
+    
+    # Look for coordinates.csv in the timepoint directory
+    timepoint_dir = image_directory / "0"
+    if timepoint_dir.exists():
+        coords_file = timepoint_dir / "coordinates.csv"
+        if coords_file.exists():
+            csv_path = coords_file
+            print(f"Found coordinates file at: {csv_path}")
+            # Get timepoint from the subdirectory name (e.g., "0" from the path)
+            timepoint = timepoint_dir.name
+    
+    # Create backup of original coordinates
+    if not skip_backup:
+        backup_path = original_coords_dir / f"original_coordinates_{timepoint}.csv"
+        import shutil
+        shutil.copy2(csv_path, backup_path)
+        print(f"Created backup of original coordinates at: {backup_path}")
+    
     # Read coordinates
     coords_df = read_coordinates_csv(csv_path)
     
     # Auto-detect channel pattern if not provided
     if channel_pattern is None:
-        channel_pattern = select_channel_pattern(image_directory)
+        # Look in the 0 subdirectory for TIFF files
+        tiff_dir = image_directory / "0"
+        if tiff_dir.exists():
+            channel_pattern = select_channel_pattern(tiff_dir)
+        else:
+            channel_pattern = select_channel_pattern(image_directory)
     
     # Initialize the updated coordinates with a copy
     updated_coords = coords_df.copy()
@@ -1205,12 +1234,22 @@ def register_and_update_coordinates(
         region_coords = coords_df[coords_df['region'] == region].copy()
         
         # Read images for this region only
-        region_images = read_tiff_images_for_region(
-            directory=image_directory,
-            pattern=channel_pattern,
-            region=region,
-            z_slice_to_keep=z_slice_for_registration
-        )
+        # Look in the 0 subdirectory for TIFF files
+        tiff_dir = image_directory / "0"
+        if tiff_dir.exists():
+            region_images = read_tiff_images_for_region(
+                directory=tiff_dir,
+                pattern=channel_pattern,
+                region=region,
+                z_slice_to_keep=z_slice_for_registration
+            )
+        else:
+            region_images = read_tiff_images_for_region(
+                directory=image_directory,
+                pattern=channel_pattern,
+                region=region,
+                z_slice_to_keep=z_slice_for_registration
+            )
         
         if not region_images:
             print(f"No images found for region {region}, skipping")
@@ -1231,7 +1270,6 @@ def register_and_update_coordinates(
                 pou=pou,
                 ncc_threshold=ncc_threshold
             )
-        
             
             # Calculate pixel size
             pixel_size_um = calculate_pixel_size_microns(
@@ -1280,13 +1318,10 @@ def register_and_update_coordinates(
         except:
             pass
     
-    # Save updated coordinates
-    if not skip_backup:
-        backup_path = csv_path.parent / f"{csv_path.stem}_backup{csv_path.suffix}"
-        import shutil
-        shutil.copy2(csv_path, backup_path)
-    
-    updated_coords.to_csv(output_csv_path, index=False)
+    # Save updated coordinates in the timepoint directory
+    timepoint_output_path = timepoint_dir / "coordinates.csv"
+    updated_coords.to_csv(timepoint_output_path, index=False)
+    print(f"Saved updated coordinates to: {timepoint_output_path}")
     
     return updated_coords
 
