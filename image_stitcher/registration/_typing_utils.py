@@ -1,7 +1,7 @@
-"""Type aliases and utilities for m2stitch.
+"""Type aliases and utilities for image registration.
 
 This module provides commonly used type aliases for numpy arrays and numeric types
-used throughout the m2stitch package.
+used throughout the registration package.
 """
 from typing import Any, Union
 
