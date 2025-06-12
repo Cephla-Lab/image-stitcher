@@ -1,6 +1,7 @@
 import math
 import tempfile
 import unittest
+import pathlib
 
 from image_stitcher.testutil import (
     PARAMETERS_FIXTURE_FILE,
@@ -34,6 +35,41 @@ class ParametersTest(unittest.TestCase):
             fixture_contents = f.read()
 
         self.assertEqual(contents, fixture_contents)
+
+    def test_flatfield_manifest_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir_path = pathlib.Path(temp_dir_name)
+            # Create a dummy flatfield manifest file
+            dummy_flatfield_manifest = temp_dir_path / "my_flatfields.json"
+            with open(dummy_flatfield_manifest, "w") as ff_man_f:
+                ff_man_f.write('{"version": 1}') # Minimal valid JSON content
+
+            # Create a temporary parameters file that uses this flatfield manifest
+            params_dict = {
+                "input_folder": temp_dir_name, # Needs to be a valid path
+                "output_format": ".ome.zarr",
+                "scan_pattern": "Unidirectional",
+                "apply_flatfield": True,
+                "flatfield_manifest": str(dummy_flatfield_manifest.resolve()),
+                "verbose": False,
+                "force_stitch_to_disk": False,
+                "num_pyramid_levels": None,
+                "output_compression": "default",
+            }
+            temp_params_file = temp_dir_path / "temp_params.json"
+            with open(temp_params_file, "w") as tp_f:
+                import json # Added import for json.dump
+                json.dump(params_dict, tp_f)
+
+            # Load parameters and check flatfield_manifest
+            params = StitchingParameters.from_json_file(str(temp_params_file))
+            self.assertTrue(params.apply_flatfield)
+            self.assertIsNotNone(params.flatfield_manifest)
+            self.assertIsInstance(params.flatfield_manifest, pathlib.Path)
+            # Pydantic should resolve the string to a Path object.
+            # We also used resolve() when writing, so it should be absolute.
+            self.assertEqual(params.flatfield_manifest, dummy_flatfield_manifest.resolve())
+            self.assertTrue(params.flatfield_manifest.is_absolute())
 
 
 class ComputedParametersTest(unittest.TestCase):

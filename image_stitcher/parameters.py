@@ -6,12 +6,14 @@ import os
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any, ClassVar, Literal, NamedTuple
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, Optional, Union
 
 import numpy as np
 import pandas as pd
 from dask_image.imread import imread as dask_imread
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, BaseModel, Field, computed_field
+
+from .z_layer_selection import ZLayerSelector
 
 DATETIME_FORMAT = "%Y-%m-%d_%H-%M-%S.%f"
 
@@ -24,6 +26,11 @@ class OutputFormat(enum.Enum):
 class ScanPattern(enum.Enum):
     unidirectional = "Unidirectional"
     s_pattern = "S-Pattern"
+
+
+class ZLayerSelection(enum.Enum):
+    ALL = "all"
+    MIDDLE = "middle"
 
 
 def input_path_exists(path: str) -> str:
@@ -39,6 +46,7 @@ class StitchingParameters(
     use_attribute_docstrings=True,
 ):
     """Parameters for microscopy image stitching operations."""
+    model_config = {"arbitrary_types_allowed": True}
 
     input_folder: Annotated[str, AfterValidator(input_path_exists)]
     """A folder on the local machine containing an image acqusition.
@@ -58,11 +66,29 @@ class StitchingParameters(
     other row goes the other direction.
     """
 
+    z_layer_selection: Union[ZLayerSelection, int] = ZLayerSelection.MIDDLE
+    """Strategy for selecting z-layers to stitch.
+
+    Accepts:
+    - `ZLayerSelection.ALL` (input as string: "all"): Stitch all z-layers.
+    - `ZLayerSelection.MIDDLE` (input as string: "middle"): Stitch only the middle z-layer from the stack (default).
+    - An integer (e.g., `2`; or input as string like "2"): Stitch a specific z-layer by its 0-based index.
+    
+    When providing via JSON or similar string-based configuration, use "all", "middle", 
+    or a string/number for the layer index (e.g., "0", "1", 2).
+    Internally, these are converted to `ZLayerSelection` enum members or `int`.
+    
+    Future options could include "max_intensity", "user_selected", etc.
+    """
+
     apply_flatfield: bool = False
     """Whether to apply a flatfield correction to the images prior to stitching."""
 
     apply_mip: bool = False
     """Whether to apply Maximum Intensity Projection (MIP) to z-stacks before stitching."""
+
+    flatfield_manifest: Optional[pathlib.Path] = None
+    """If set, a path (folder or .json) from which to load precomputed flatfields."""
 
     verbose: bool = False
     """Show debug-level logging."""
@@ -92,9 +118,12 @@ class StitchingParameters(
     default compression algorithm.
     """
 
-    def model_post_init(self, __context: Any) -> None:
-        """Validate and process parameters after initialization."""
-        self.input_folder = os.path.abspath(self.input_folder)
+    @computed_field
+    @property
+    def z_layer_selector(self) -> ZLayerSelector:
+        """The ZLayerSelector instance that will be used for selecting z-layers."""
+        from .z_layer_selection import create_z_layer_selector
+        return create_z_layer_selector(self.z_layer_selection)
 
     @property
     def stitched_folder(self) -> pathlib.Path:
