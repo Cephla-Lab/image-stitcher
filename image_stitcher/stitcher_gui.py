@@ -1,6 +1,6 @@
 import logging
 import sys
-from typing import Any, cast
+from typing import Any, cast, Union
 import pathlib
 import enum
 
@@ -14,18 +14,30 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
+    QSpacerItem,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from .parameters import OutputFormat, ScanPattern, StitchingParameters
-from .stitcher import ProgressCallbacks, Stitcher
+from image_stitcher.parameters import (
+    DATETIME_FORMAT,
+    OutputFormat,
+    ScanPattern,
+    StitchingParameters,
+    ZLayerSelection,
+)
+from image_stitcher.stitcher import ProgressCallbacks, Stitcher
 
 # Enum for Flatfield Modes
 class FlatfieldModeOption(enum.Enum):
@@ -75,6 +87,11 @@ class StitchingGUI(QWidget):
     starting_stitching = Signal()
     starting_saving = Signal(bool)
     finished_saving = Signal(str, object)
+
+    # Constants for Z-layer selection modes
+    Z_LAYER_MODE_MIDDLE = "Middle Layer"
+    Z_LAYER_MODE_ALL = "All Layers"
+    Z_LAYER_MODE_SPECIFIC = "Specific Layer"
 
     def __init__(self) -> None:
         super().__init__()
@@ -127,6 +144,29 @@ class StitchingGUI(QWidget):
         self.loadFlatfieldBtn.setVisible(False)
         self.layout.addWidget(self.loadFlatfieldBtn)  # type: ignore
 
+        # --- Z-Layer Selection Options ---
+        self.zLayerLabel = QLabel("Z-Layer Selection:", self)
+        self.layout.addWidget(self.zLayerLabel)  # type: ignore
+
+        self.zLayerModeCombo = QComboBox(self)
+        self.zLayerModeCombo.addItems([
+            self.Z_LAYER_MODE_MIDDLE,
+            self.Z_LAYER_MODE_ALL,
+            self.Z_LAYER_MODE_SPECIFIC,
+        ])
+        self.zLayerModeCombo.currentTextChanged.connect(self.onZLayerModeChanged)
+        self.layout.addWidget(self.zLayerModeCombo)  # type: ignore
+
+        self.zLayerSpinLabel = QLabel("Select Z-Layer Index:", self)
+        self.zLayerSpinLabel.setVisible(False)
+        self.layout.addWidget(self.zLayerSpinLabel)  # type: ignore
+
+        self.zLayerSpinBox = QSpinBox(self)
+        self.zLayerSpinBox.setMinimum(0)
+        self.zLayerSpinBox.setMaximum(999)  # Will be updated based on actual data
+        self.zLayerSpinBox.setVisible(False)
+        self.layout.addWidget(self.zLayerSpinBox)  # type: ignore
+
         self.pyramidLabel = QLabel(
             "Number of output levels for the image pyramid", self
         )
@@ -176,6 +216,39 @@ class StitchingGUI(QWidget):
         )
         if self.inputDirectory:
             self.inputDirectoryBtn.setText(f"Selected: {self.inputDirectory}")
+            self._discover_dataset_z_count()
+
+    def _discover_dataset_z_count(self) -> None:
+        """Probe the dataset to discover the number of z-layers and update UI accordingly."""
+        try:
+            # Create temporary parameters to probe the dataset
+            temp_params = StitchingParameters(
+                input_folder=self.inputDirectory,
+                output_format=OutputFormat.ome_zarr,  # Doesn't matter for probing
+                scan_pattern=ScanPattern.unidirectional,
+            )
+            temp_stitcher = Stitcher(temp_params)
+            num_z = temp_stitcher.computed_parameters.num_z
+
+            # Update the z-layer spinbox range
+            self.zLayerSpinBox.setMaximum(num_z - 1)
+            self.zLayerSpinLabel.setText(f"Select Z-Layer Index (0-{num_z - 1}):")
+
+            # If middle layer is selected, show which layer that would be
+            if self.zLayerModeCombo.currentText() == self.Z_LAYER_MODE_MIDDLE:
+                middle_idx = num_z // 2
+                self.zLayerLabel.setText(
+                    f"Z-Layer Selection (total layers: {num_z}, middle: {middle_idx}):"
+                )
+            else:
+                self.zLayerLabel.setText(
+                    f"Z-Layer Selection (total layers: {num_z}):"
+                )
+
+        except (FileNotFoundError, ValueError, KeyError) as e:
+            # If we can't probe the dataset due to missing/invalid data, just show the error and continue
+            logging.warning(f"Could not probe dataset for z-layers: {e}")
+            self.zLayerLabel.setText("Z-Layer Selection:")
 
     def onStitchingStart(self) -> None:
         """Start stitching from GUI."""
@@ -186,31 +259,27 @@ class StitchingGUI(QWidget):
             return
 
         try:
-            # Create parameters from UI state
-            selected_flatfield_str = self.flatfieldModeCombo.currentText()
-            flatfield_mode_option = get_flatfield_mode_from_string(selected_flatfield_str)
+            format_text = self.outputFormatCombo.currentText()
+            if format_text == "OME-ZARR":
+                output_format = OutputFormat.ome_zarr
+            elif format_text == "OME-TIFF":
+                output_format = OutputFormat.ome_tiff
+            else:
+                QMessageBox.critical(self, "Internal Error", f"Invalid output format selected: {format_text}")
+                return
 
-            apply_flatfield = flatfield_mode_option in (
-                FlatfieldModeOption.COMPUTE,
-                FlatfieldModeOption.LOAD,
-            )
-            flatfield_manifest_to_use = (
-                self.flatfield_manifest
-                if flatfield_mode_option == FlatfieldModeOption.LOAD
-                else None
-            )
+            # Determine z-layer selection strategy
+            z_layer_selection_value = self._get_z_layer_selection_value()
 
             params = StitchingParameters(
                 input_folder=self.inputDirectory,
-                output_format=OutputFormat(
-                    "." + self.outputFormatCombo.currentText().lower().replace("-", ".")
-                ),
+                output_format=output_format,
                 scan_pattern=ScanPattern.unidirectional,
-                apply_flatfield=apply_flatfield,
-                flatfield_manifest=flatfield_manifest_to_use,
+                z_layer_selection=z_layer_selection_value,
+                apply_flatfield=self.flatfieldCorrectCheckbox.isChecked(),
             )
 
-            if self.outputFormatCombo.currentText() == "OME-ZARR":
+            if output_format == OutputFormat.ome_zarr:
                 if not self.pyramidCheckbox.isChecked():
                     params.num_pyramid_levels = self.pyramidLevels.value()
                 params.output_compression = self.outputCompression.currentText()  # type: ignore
@@ -287,6 +356,36 @@ class StitchingGUI(QWidget):
         else:
             if not self.flatfield_manifest:
                 self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
+
+    def onZLayerModeChanged(self, mode: str) -> None:
+        """Handle z-layer mode selection changes."""
+        # Show/hide specific layer controls based on selection
+        if mode == self.Z_LAYER_MODE_SPECIFIC:
+            self.zLayerSpinLabel.setVisible(True)
+            self.zLayerSpinBox.setVisible(True)
+        else:
+            self.zLayerSpinLabel.setVisible(False)
+            self.zLayerSpinBox.setVisible(False)
+
+    def _get_z_layer_selection_value(self) -> Union[ZLayerSelection, int]:
+        """Determines the z-layer selection strategy based on GUI state."""
+        current_mode = self.zLayerModeCombo.currentText()
+
+        if current_mode == self.Z_LAYER_MODE_MIDDLE:
+            return ZLayerSelection.MIDDLE
+        elif current_mode == self.Z_LAYER_MODE_ALL:
+            return ZLayerSelection.ALL
+        elif current_mode == self.Z_LAYER_MODE_SPECIFIC:
+            return self.zLayerSpinBox.value()
+        else:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Unhandled z-layer selection mode: '{current_mode}'. Please report this bug.",
+            )
+            raise NotImplementedError(
+                f"Unhandled z-layer selection mode: '{current_mode}'"
+            )
 
     def setupConnections(self) -> None:
         assert self.stitcher is not None
