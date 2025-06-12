@@ -7,15 +7,18 @@ from a z-stack acquisition.
 import logging
 from abc import ABC, abstractmethod
 from typing import Protocol, Union, TYPE_CHECKING
+import json
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from .parameters import MetaKey, AcquisitionMetadata, ZLayerSelection
 
 
-class ZLayerSelector(ABC):
+class ZLayerSelector(BaseModel):
     """Abstract base class for z-layer selection strategies."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @abstractmethod
     def select_z_layers(
@@ -36,6 +39,14 @@ class ZLayerSelector(ABC):
     def get_name(self) -> str:
         """Get a descriptive name for this selection strategy."""
         pass
+
+    def model_dump(self) -> dict:
+        """Serialize the selector to a dictionary."""
+        return {"type": self.get_name()}
+
+    def model_dump_json(self) -> str:
+        """Serialize the selector to JSON."""
+        return json.dumps(self.model_dump())
 
 
 class MiddleLayerSelector(ZLayerSelector):
@@ -89,14 +100,7 @@ class AllLayersSelector(ZLayerSelector):
 
 class SpecificLayerSelector(ZLayerSelector):
     """Selects a specific z-layer by index."""
-
-    def __init__(self, layer_index: int):
-        """Initialize with a specific layer index.
-
-        Args:
-            layer_index: The z-layer index to select (0-based)
-        """
-        self.layer_index = layer_index
+    layer_index: int
 
     def select_z_layers(
         self, metadata: dict['MetaKey', 'AcquisitionMetadata'], num_z: int
@@ -173,12 +177,12 @@ def create_z_layer_selector(strategy: Union['ZLayerSelection', int, str]) -> ZLa
         # Should not happen if enum is exhaustive
         raise ValueError(f"Unhandled ZLayerSelection enum member: {strategy}")
     elif isinstance(strategy, int):
-        return SpecificLayerSelector(strategy)
+        return SpecificLayerSelector(layer_index=strategy)
     elif isinstance(strategy, str):
         # Check if strategy is a numeric string
         if strategy.isdigit():
             layer_index = int(strategy)
-            return SpecificLayerSelector(layer_index)
+            return SpecificLayerSelector(layer_index=layer_index)
 
         strategies = {
             "all": AllLayersSelector,

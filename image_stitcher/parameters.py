@@ -11,7 +11,7 @@ from typing import Annotated, Any, ClassVar, Literal, NamedTuple, Optional, Unio
 import numpy as np
 import pandas as pd
 from dask_image.imread import imread as dask_imread
-from pydantic import AfterValidator, BaseModel, Field, computed_field
+from pydantic import AfterValidator, BaseModel, Field, computed_field, ConfigDict
 
 from .z_layer_selection import ZLayerSelector
 
@@ -46,7 +46,11 @@ class StitchingParameters(
     use_attribute_docstrings=True,
 ):
     """Parameters for microscopy image stitching operations."""
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        exclude={"z_layer_selector"},
+        json_schema_extra={"exclude": {"z_layer_selector"}}
+    )
 
     input_folder: Annotated[str, AfterValidator(input_path_exists)]
     """A folder on the local machine containing an image acqusition.
@@ -154,6 +158,16 @@ class StitchingParameters(
         with open(json_path, "w") as f:
             f.write(self.model_dump_json(indent=2))
 
+    def model_dump(self, **kwargs) -> dict:
+        """Override model_dump to exclude z_layer_selector."""
+        kwargs["exclude"] = {"z_layer_selector"}
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs) -> str:
+        """Override model_dump_json to exclude z_layer_selector."""
+        kwargs["exclude"] = {"z_layer_selector"}
+        return super().model_dump_json(**kwargs)
+
 
 @dataclass
 class UnidirectionalScanPatternParams:
@@ -170,13 +184,12 @@ class ReverseRows(enum.Enum):
     odd = "odd"
 
     def is_reversed(self, row_idx: int) -> bool:
-        match self:
-            case ReverseRows.even:
-                return row_idx % 2 == 0
-            case ReverseRows.odd:
-                return row_idx % 2 == 1
-            case _ as unreachable:
-                raise RuntimeError(unreachable)
+        if self == ReverseRows.even:
+            return row_idx % 2 == 0
+        elif self == ReverseRows.odd:
+            return row_idx % 2 == 1
+        else:
+            raise RuntimeError(f"Unexpected ReverseRows value: {self}")
 
 
 @dataclass
@@ -193,13 +206,12 @@ ScanParams = UnidirectionalScanPatternParams | SPatternScanParams
 
 
 def default_scan_params(pattern: ScanPattern) -> ScanParams:
-    match pattern:
-        case ScanPattern.unidirectional:
-            return UnidirectionalScanPatternParams()
-        case ScanPattern.s_pattern:
-            return SPatternScanParams()
-        case _ as unreachable:
-            raise RuntimeError(unreachable)
+    if pattern == ScanPattern.unidirectional:
+        return UnidirectionalScanPatternParams()
+    elif pattern == ScanPattern.s_pattern:
+        return SPatternScanParams()
+    else:
+        raise RuntimeError(f"Unexpected ScanPattern value: {pattern}")
 
 
 class MetaKey(NamedTuple):
@@ -596,3 +608,12 @@ class StitchingComputedParameters:
         scans that are not perfectly aligned to a grid.
         """
         return sorted(set(y for _, y in self.xy_positions))
+
+
+class ZLayerSelector(BaseModel):
+    """Base class for z-layer selection strategies."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def select_layers(self, num_layers: int) -> list[int]:
+        """Select which z-layers to use from the stack."""
+        raise NotImplementedError("Subclasses must implement select_layers")

@@ -314,7 +314,7 @@ class Stitcher:
             logging.info(f"Applying Maximum Intensity Projection (MIP) to z-stacks")
             # Group tiles by (t, region, fov_idx, channel) for MIP processing
             tile_groups = {}
-            for key, tile_info in region_metadata.items():
+            for key, tile_info in self.metadata.items():
                 t, region_name, fov_idx, z_level, channel = key
                 group_key = (t, region_name, fov_idx, channel)
                 if group_key not in tile_groups:
@@ -355,7 +355,7 @@ class Stitcher:
                 processed_tiles += len(z_tiles)
         else:
             # Original processing logic for non-MIP case
-            for key, tile_info in region_metadata.items():
+            for key, tile_info in self.metadata.items():
                 t, _, _, z_level, channel = key
                 tile = skimage.io.imread(tile_info.filepath)
 
@@ -366,7 +366,10 @@ class Stitcher:
                     (tile_info.y - y_min) * 1000 / self.computed_parameters.pixel_size_um
                 )
 
-                self.place_tile(stitched_region, tile, x_pixel, y_pixel, z_level, channel)
+                # Map z_level to output array index
+                output_z_level = z_index_map[z_level]
+
+                self.place_tile(stitched_region, tile, x_pixel, y_pixel, output_z_level, channel)
 
                 self.callbacks.update_progress(processed_tiles, total_tiles)
                 processed_tiles += 1
