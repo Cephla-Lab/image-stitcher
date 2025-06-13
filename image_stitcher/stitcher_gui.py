@@ -1,61 +1,32 @@
 import logging
 import sys
-from typing import Any, cast, Union
+from typing import Any, cast
 import pathlib
-import enum
 
 import napari
 import numpy as np
 from napari.utils.colormaps import AVAILABLE_COLORMAPS, Colormap
-from PyQt5.QtCore import QThread
+from PyQt5.QtCore import QThread, Qt, QUrl
 from PyQt5.QtCore import pyqtSignal as Signal
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSizePolicy,
-    QSpacerItem,
     QSpinBox,
     QVBoxLayout,
     QWidget,
+    QGridLayout,
+    QGroupBox,
 )
 
-from image_stitcher.parameters import (
-    DATETIME_FORMAT,
-    OutputFormat,
-    ScanPattern,
-    StitchingParameters,
-    ZLayerSelection,
-)
-from image_stitcher.stitcher import ProgressCallbacks, Stitcher
-
-# Enum for Flatfield Modes
-class FlatfieldModeOption(enum.Enum):
-    NONE = "No Flatfield Correction"
-    COMPUTE = "Compute Flatfield Correction"
-    LOAD = "Load Precomputed Flatfield"
-
-def get_flatfield_mode_from_string(combo_value: str) -> FlatfieldModeOption:
-    if combo_value == FlatfieldModeOption.NONE.value:
-        return FlatfieldModeOption.NONE
-    elif combo_value == FlatfieldModeOption.COMPUTE.value:
-        return FlatfieldModeOption.COMPUTE
-    elif combo_value == FlatfieldModeOption.LOAD.value:
-        return FlatfieldModeOption.LOAD
-    else:
-        # This case should ideally not be reached if combo box items are populated from the enum.
-        raise ValueError(f"Unknown flatfield mode string from combo box: '{combo_value}'")
-
+from .parameters import OutputFormat, ScanPattern, StitchingParameters
+from .stitcher import ProgressCallbacks, Stitcher
 
 # TODO(colin): this is almost but not quite the same as the map in
 # StitchingComputedParameters.get_channel_color. Reconcile the differences?
@@ -69,6 +40,52 @@ CHANNEL_COLORS_MAP = {
     "G": {"hex": 0x1FFF00, "name": "green"},
     "B": {"hex": 0x3300FF, "name": "blue"},
 }
+
+
+class DragDropArea(QLabel):
+    path_dropped = Signal(str)
+
+    def __init__(self, title: str, parent: QWidget | None = None):
+        super().__init__(title, parent)
+        self.setMinimumHeight(50)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #aaa;
+                border-radius: 5px;
+                background-color: #f0f0f0;
+            }
+        """)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event: Any) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: Any) -> None:
+        if event.mimeData().hasUrls():
+            url = event.mimeData().urls()[0]
+            if url.isLocalFile():
+                self.path_dropped.emit(url.toLocalFile())
+                self.setText(f"Loaded: {pathlib.Path(url.toLocalFile()).name}")
+                self.setStyleSheet("""
+                    QLabel {
+                        border: 2px solid green;
+                        border-radius: 5px;
+                        background-color: #e0ffe0;
+                    }
+                """)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
 
 class StitcherThread(QThread):
@@ -88,11 +105,6 @@ class StitchingGUI(QWidget):
     starting_saving = Signal(bool)
     finished_saving = Signal(str, object)
 
-    # Constants for Z-layer selection modes
-    Z_LAYER_MODE_MIDDLE = "Middle Layer"
-    Z_LAYER_MODE_ALL = "All Layers"
-    Z_LAYER_MODE_SPECIFIC = "Specific Layer"
-
     def __init__(self) -> None:
         super().__init__()
         self.stitcher: StitcherThread | None = (
@@ -107,152 +119,156 @@ class StitchingGUI(QWidget):
         self.initUI()
 
     def initUI(self) -> None:
-        self.layout = QVBoxLayout(self)  # type: ignore
+        self.mainLayout = QGridLayout(self) # Main layout for the window
+        self.setLayout(self.mainLayout)
+        self.mainLayout.setSpacing(10)
+        self.mainLayout.setContentsMargins(10, 10, 10, 10)
 
-        # Input Directory Selection (full width at the top)
-        self.inputDirectoryBtn = QPushButton("Select Input Directory", self)
-        self.inputDirectoryBtn.clicked.connect(self.selectInputDirectory)
-        self.layout.addWidget(self.inputDirectoryBtn)  # type: ignore
+        # --- Acquisition Settings --- #
+        acquisition_group = QGroupBox("Acquisition Settings")
+        acquisition_layout = QGridLayout()
+        acquisition_group.setLayout(acquisition_layout)
+        self.mainLayout.addWidget(acquisition_group, 0, 0, 1, 2)
 
-        # Output format combo box (full width)
-        self.outputFormatCombo = QComboBox(self)
-        self.outputFormatCombo.addItems(["OME-ZARR", "OME-TIFF"])
-        self.outputFormatCombo.currentTextChanged.connect(self.onFormatChange)
-        self.layout.addWidget(self.outputFormatCombo)  # type: ignore
+        self.inputDirLabel = QLabel("Acquisition Directory:", self)
+        acquisition_layout.addWidget(self.inputDirLabel, 0, 0)
+        self.inputDirDropArea = DragDropArea("Drag & Drop Input Directory Here", self)
+        self.inputDirDropArea.path_dropped.connect(self.onInputDirectoryDropped)
+        acquisition_layout.addWidget(self.inputDirDropArea, 0, 1)
 
-        self.compressionLabel = QLabel("Output compression", self)
-        self.layout.addWidget(self.compressionLabel)  # type: ignore
-        self.outputCompression = QComboBox(self)
-        self.outputCompression.addItems(["default", "none"])
-        self.layout.addWidget(self.outputCompression)  # type: ignore
+        # --- Flatfield Correction Options --- #
+        flatfield_group = QGroupBox("Flatfield Correction")
+        flatfield_layout = QGridLayout()
+        flatfield_group.setLayout(flatfield_layout)
+        self.mainLayout.addWidget(flatfield_group, 1, 0, 1, 2) 
 
-        self.pyramidCheckbox = QCheckBox("Infer levels for output image pyramid", self)
-        self.pyramidCheckbox.setChecked(True)
-        self.pyramidCheckbox.toggled.connect(self.onPyramidChange)
-        self.layout.addWidget(self.pyramidCheckbox)  # type: ignore
-
-        # --- Flatfield Correction Options ---
+        self.flatfieldModeLabel = QLabel("Correction Mode:", self)
+        flatfield_layout.addWidget(self.flatfieldModeLabel, 0, 0)
         self.flatfieldModeCombo = QComboBox(self)
         self.flatfieldModeCombo.addItems(
-            [mode.value for mode in FlatfieldModeOption]
+            [
+                "No Flatfield Correction",
+                "Compute Flatfield Correction",
+                "Load Precomputed Flatfield",
+            ]
         )
         self.flatfieldModeCombo.currentIndexChanged.connect(self.onFlatfieldModeChanged)
-        self.layout.addWidget(self.flatfieldModeCombo)
+        flatfield_layout.addWidget(self.flatfieldModeCombo, 0, 1)
 
-        self.loadFlatfieldBtn = QPushButton("Select Flatfield Manifest File", self)
-        self.loadFlatfieldBtn.clicked.connect(self.onLoadFlatfield)
-        self.loadFlatfieldBtn.setVisible(False)
-        self.layout.addWidget(self.loadFlatfieldBtn)  # type: ignore
+        self.flatfieldLoadLabel = QLabel("Load Flatfield:", self)
+        flatfield_layout.addWidget(self.flatfieldLoadLabel, 1, 0)
+        self.flatfieldLoadLabel.setVisible(False) # Initially hidden
+        self.loadFlatfieldDropArea = DragDropArea("Drag & Drop Flatfield Directory Here", self)
+        self.loadFlatfieldDropArea.path_dropped.connect(self.onLoadFlatfieldDropped)
+        flatfield_layout.addWidget(self.loadFlatfieldDropArea, 1, 1)
+        self.loadFlatfieldDropArea.setVisible(False) # Initially hidden
 
-        # --- Z-Layer Selection Options ---
-        self.zLayerLabel = QLabel("Z-Layer Selection:", self)
-        self.layout.addWidget(self.zLayerLabel)  # type: ignore
+        # --- Z-Stack Options --- #        
+        z_stack_group = QGroupBox("Z-Stack Options")
+        z_stack_layout = QGridLayout()
+        z_stack_group.setLayout(z_stack_layout)
+        self.mainLayout.addWidget(z_stack_group, 2, 0, 1, 2)
 
+        self.zLayerLabel = QLabel("Processing Mode:", self)
+        z_stack_layout.addWidget(self.zLayerLabel, 0, 0)
         self.zLayerModeCombo = QComboBox(self)
-        self.zLayerModeCombo.addItems([
-            self.Z_LAYER_MODE_MIDDLE,
-            self.Z_LAYER_MODE_ALL,
-            self.Z_LAYER_MODE_SPECIFIC,
-        ])
-        self.zLayerModeCombo.currentTextChanged.connect(self.onZLayerModeChanged)
-        self.layout.addWidget(self.zLayerModeCombo)  # type: ignore
+        self.zLayerModeCombo.addItems(["Middle Layer", "All Layers", "Specific Layer", "Maximum Intensity Projection (MIP)"])
+        self.zLayerModeCombo.currentIndexChanged.connect(self.onZLayerModeChanged)
+        z_stack_layout.addWidget(self.zLayerModeCombo, 0, 1)
 
         self.zLayerSpinLabel = QLabel("Select Z-Layer Index:", self)
-        self.zLayerSpinLabel.setVisible(False)
-        self.layout.addWidget(self.zLayerSpinLabel)  # type: ignore
+        z_stack_layout.addWidget(self.zLayerSpinLabel, 1, 0)
+        self.zLayerSpinLabel.setVisible(False) 
 
         self.zLayerSpinBox = QSpinBox(self)
         self.zLayerSpinBox.setMinimum(0)
         self.zLayerSpinBox.setMaximum(999)  # Will be updated based on actual data
-        self.zLayerSpinBox.setVisible(False)
-        self.layout.addWidget(self.zLayerSpinBox)  # type: ignore
+        z_stack_layout.addWidget(self.zLayerSpinBox, 1, 1)
+        self.zLayerSpinBox.setVisible(False) 
 
-        self.mipCheckbox = QCheckBox("Apply Maximum Intensity Projection (MIP)", self)
-        self.mipCheckbox.setChecked(False)
-        self.layout.addWidget(self.mipCheckbox)
+        # --- Status and Progress --- # 
+        status_group = QGroupBox("Status")
+        status_layout = QVBoxLayout() # Using QVBoxLayout for simple vertical stacking
+        status_group.setLayout(status_layout)
+        self.mainLayout.addWidget(status_group, 3, 0, 1, 2)
 
-        self.pyramidLabel = QLabel(
-            "Number of output levels for the image pyramid", self
-        )
-        self.layout.addWidget(self.pyramidLabel)  # type: ignore
-        self.pyramidLabel.hide()
-        self.pyramidLevels = QSpinBox(self)
-        self.pyramidLevels.setMaximum(32)
-        self.pyramidLevels.setMinimum(1)
-        self.layout.addWidget(self.pyramidLevels)  # type: ignore
-        self.pyramidLevels.hide()
-
-        # Status label
         self.statusLabel = QLabel("Status: Ready", self)
-        self.layout.addWidget(self.statusLabel)  # type: ignore
+        status_layout.addWidget(self.statusLabel)  
 
+        self.progressBar = QProgressBar(self)
+        self.progressBar.hide()
+        status_layout.addWidget(self.progressBar)  
+
+        # --- Action Buttons --- #
         # Start stitching button
         self.startBtn = QPushButton("Start Stitching", self)
         self.startBtn.clicked.connect(self.onStitchingStart)
-        self.layout.addWidget(self.startBtn)  # type: ignore
-
-        # Progress bar setup
-        self.progressBar = QProgressBar(self)
-        self.progressBar.hide()
-        self.layout.addWidget(self.progressBar)  # type: ignore
-
-        # Output path QLineEdit
-        self.outputPathEdit = QLineEdit(self)
-        self.outputPathEdit.setPlaceholderText(
-            "Enter Filepath To Visualize (No Stitching Required)"
-        )
-        self.layout.addWidget(self.outputPathEdit)  # type: ignore
+        self.mainLayout.addWidget(self.startBtn, 4, 0, 1, 1)
 
         # View in Napari button
         self.viewBtn = QPushButton("View Output in Napari", self)
         self.viewBtn.clicked.connect(self.onViewOutput)
         self.viewBtn.setEnabled(False)
-        self.layout.addWidget(self.viewBtn)  # type: ignore
+        self.mainLayout.addWidget(self.viewBtn, 4, 1, 1, 1)
+        
+        # Add stretch to push everything to the top
+        self.mainLayout.setRowStretch(5, 1) 
 
-        self.layout.insertStretch(-1, 1)  # type: ignore
         self.setWindowTitle("Cephla Image Stitcher")
-        self.setGeometry(300, 300, 500, 300)
+        self.setGeometry(300, 300, 600, 400) # Adjusted size
         self.show()
 
-    def selectInputDirectory(self) -> None:
-        self.inputDirectory = QFileDialog.getExistingDirectory(
-            self, "Select Input Image Folder"
-        )
-        if self.inputDirectory:
-            self.inputDirectoryBtn.setText(f"Selected: {self.inputDirectory}")
-            self._discover_dataset_z_count()
+    def onInputDirectoryDropped(self, path: str) -> None:
+        if pathlib.Path(path).is_dir():
+            self.inputDirectory = path
+            self.probeDatasetForZLayers()
+        else:
+            QMessageBox.warning(self, "Input Error", "Please drop a directory, not a file.")
+            self.inputDirDropArea.setText("Drag & Drop Input Directory Here") # Reset text
+            self.inputDirDropArea.setStyleSheet("""
+                QLabel {
+                    border: 2px dashed #aaa;
+                    border-radius: 5px;
+                    background-color: #f0f0f0;
+                }
+            """)
 
-    def _discover_dataset_z_count(self) -> None:
-        """Probe the dataset to discover the number of z-layers and update UI accordingly."""
+    def selectInputDirectory(self) -> None: # Kept for now, can be removed if button is fully replaced
+        dir = QFileDialog.getExistingDirectory(self, "Select Input Image Folder")
+        if dir:
+            self.inputDirectory = dir
+            self.inputDirDropArea.setText(f"Loaded: {pathlib.Path(dir).name}")
+            self.inputDirDropArea.setStyleSheet("""QLabel {border: 2px solid green; border-radius: 5px; background-color: #e0ffe0;}""")
+            self.probeDatasetForZLayers()
+
+    def probeDatasetForZLayers(self) -> None:
+        if not self.inputDirectory:
+            return
         try:
-            # Create temporary parameters to probe the dataset
             temp_params = StitchingParameters(
                 input_folder=self.inputDirectory,
-                output_format=OutputFormat.ome_zarr,  # Doesn't matter for probing
+                output_format=OutputFormat.ome_zarr, 
                 scan_pattern=ScanPattern.unidirectional,
             )
             temp_stitcher = Stitcher(temp_params)
             num_z = temp_stitcher.computed_parameters.num_z
 
-            # Update the z-layer spinbox range
             self.zLayerSpinBox.setMaximum(num_z - 1)
             self.zLayerSpinLabel.setText(f"Select Z-Layer Index (0-{num_z - 1}):")
 
-            # If middle layer is selected, show which layer that would be
-            if self.zLayerModeCombo.currentText() == self.Z_LAYER_MODE_MIDDLE:
+            if self.zLayerModeCombo.currentIndex() == 0:  # Middle Layer
                 middle_idx = num_z // 2
                 self.zLayerLabel.setText(
-                    f"Z-Layer Selection (total layers: {num_z}, middle: {middle_idx}):"
+                    f"Processing Mode (total layers: {num_z}, middle: {middle_idx}):"
                 )
             else:
                 self.zLayerLabel.setText(
-                    f"Z-Layer Selection (total layers: {num_z}):"
+                    f"Processing Mode (total layers: {num_z}):"
                 )
 
-        except (FileNotFoundError, ValueError, KeyError) as e:
-            # If we can't probe the dataset due to missing/invalid data, just show the error and continue
+        except Exception as e:
             logging.warning(f"Could not probe dataset for z-layers: {e}")
-            self.zLayerLabel.setText("Z-Layer Selection:")
+            self.zLayerLabel.setText("Processing Mode:")
 
     def onStitchingStart(self) -> None:
         """Start stitching from GUI."""
@@ -263,31 +279,30 @@ class StitchingGUI(QWidget):
             return
 
         try:
-            format_text = self.outputFormatCombo.currentText()
-            if format_text == "OME-ZARR":
-                output_format = OutputFormat.ome_zarr
-            elif format_text == "OME-TIFF":
-                output_format = OutputFormat.ome_tiff
-            else:
-                QMessageBox.critical(self, "Internal Error", f"Invalid output format selected: {format_text}")
-                return
+            # Create parameters from UI state
+            mode = self.flatfieldModeCombo.currentIndex()
+            apply_flatfield = mode in (1, 2)
+            flatfield_manifest = self.flatfield_manifest if mode == 2 else None
 
             # Determine z-layer selection strategy
-            z_layer_selection_value = self._get_z_layer_selection_value()
+            z_layer_mode = self.zLayerModeCombo.currentIndex()
+            if z_layer_mode == 0:  # Middle Layer
+                z_layer_selection = "middle"
+            elif z_layer_mode == 1:  # All Layers
+                z_layer_selection = "all"
+            elif z_layer_mode == 2:  # Specific Layer
+                z_layer_selection = str(self.zLayerSpinBox.value())
+            else:  # MIP
+                z_layer_selection = "mip"
 
             params = StitchingParameters(
                 input_folder=self.inputDirectory,
-                output_format=output_format,
+                output_format=OutputFormat.ome_zarr,
                 scan_pattern=ScanPattern.unidirectional,
-                z_layer_selection=z_layer_selection_value,
-                apply_flatfield=self.flatfieldCorrectCheckbox.isChecked(),
-                apply_mip=self.mipCheckbox.isChecked(),
+                apply_flatfield=apply_flatfield,
+                flatfield_manifest=flatfield_manifest,
+                z_layer_selection=z_layer_selection,
             )
-
-            if output_format == OutputFormat.ome_zarr:
-                if not self.pyramidCheckbox.isChecked():
-                    params.num_pyramid_levels = self.pyramidLevels.value()
-                params.output_compression = self.outputCompression.currentText()  # type: ignore
 
             self.stitcher = StitcherThread(
                 Stitcher(
@@ -312,85 +327,114 @@ class StitchingGUI(QWidget):
             QMessageBox.critical(self, "Stitching Error", str(e))
             self.statusLabel.setText("Status: Error Encountered")
 
-    def onFormatChange(self, format: str) -> None:
-        if format == "OME-ZARR":
-            self.pyramidCheckbox.show()
-            self.compressionLabel.show()
-            self.outputCompression.show()
-            if not self.pyramidCheckbox.isChecked():
-                self.pyramidLabel.show()
-                self.pyramidLevels.show()
-
-        else:
-            assert format == "OME-TIFF"
-            self.compressionLabel.hide()
-            self.outputCompression.hide()
-            self.pyramidCheckbox.hide()
-            self.pyramidLabel.hide()
-            self.pyramidLevels.hide()
-
-    def onPyramidChange(self, checked: bool) -> None:
-        if checked:
-            self.pyramidLevels.hide()
-            self.pyramidLabel.hide()
-        else:
-            self.pyramidLabel.show()
-            self.pyramidLevels.show()
-
     def onFlatfieldModeChanged(self, idx: int) -> None:
-        selected_mode_str = self.flatfieldModeCombo.currentText()
-        flatfield_mode_option = get_flatfield_mode_from_string(selected_mode_str)
-
-        self.loadFlatfieldBtn.setVisible(flatfield_mode_option == FlatfieldModeOption.LOAD)
-        
-        if flatfield_mode_option != FlatfieldModeOption.LOAD:
+        show_load_option = (idx == 2)
+        self.flatfieldLoadLabel.setVisible(show_load_option)
+        self.loadFlatfieldDropArea.setVisible(show_load_option)
+        if not show_load_option:
             self.flatfield_manifest = None
-            self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
-        elif self.flatfield_manifest:
-            self.loadFlatfieldBtn.setText(f"Selected: {self.flatfield_manifest.name}")
-        else:
-            self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
+            self.loadFlatfieldDropArea.setText("Drag & Drop Flatfield Directory Here")
+            self.loadFlatfieldDropArea.setStyleSheet("""
+                QLabel {
+                    border: 2px dashed #aaa;
+                    border-radius: 5px;
+                    background-color: #f0f0f0;
+                }
+            """)
+        elif show_load_option and self.flatfield_manifest:
+             self.loadFlatfieldDropArea.setText(f"Loaded: {self.flatfield_manifest.name}")
+             self.loadFlatfieldDropArea.setStyleSheet("""
+                QLabel {
+                    border: 2px solid green;
+                    border-radius: 5px;
+                    background-color: #e0ffe0;
+                }
+            """)
 
-    def onLoadFlatfield(self) -> None:
-        manifest_filepath_str, _ = QFileDialog.getOpenFileName(
-            self, "Select Flatfield Manifest File", "", "JSON files (*.json)"
-        )
-        if manifest_filepath_str:
-            self.flatfield_manifest = pathlib.Path(manifest_filepath_str)
-            self.loadFlatfieldBtn.setText(f"Selected: {self.flatfield_manifest.name}")
+    def onLoadFlatfieldDropped(self, path: str) -> None:
+        path_obj = pathlib.Path(path)
+        if path_obj.is_dir():
+            # Look for flatfield_manifest.json in the directory
+            manifest_path = path_obj / "flatfield_manifest.json"
+            if manifest_path.exists():
+                self.flatfield_manifest = manifest_path
+                self.loadFlatfieldDropArea.setText(f"Loaded: {manifest_path.name}")
+                self.loadFlatfieldDropArea.setStyleSheet("""
+                    QLabel {
+                        border: 2px solid green;
+                        border-radius: 5px;
+                        background-color: #e0ffe0;
+                    }
+                """)
+            else:
+                QMessageBox.warning(self, "Input Error", "No flatfield_manifest.json found in the dropped directory.")
+                self.flatfield_manifest = None
+                self.loadFlatfieldDropArea.setText("Drag & Drop Flatfield Directory Here")
+                self.loadFlatfieldDropArea.setStyleSheet("""
+                    QLabel {
+                        border: 2px dashed #aaa;
+                        border-radius: 5px;
+                        background-color: #f0f0f0;
+                    }
+                """)
         else:
-            if not self.flatfield_manifest:
-                self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
+            QMessageBox.warning(self, "Input Error", "Please drop a directory for flatfield data.")
+            self.flatfield_manifest = None
+            self.loadFlatfieldDropArea.setText("Drag & Drop Flatfield Directory Here")
+            self.loadFlatfieldDropArea.setStyleSheet("""
+                QLabel {
+                    border: 2px dashed #aaa;
+                    border-radius: 5px;
+                    background-color: #f0f0f0;
+                }
+            """)
 
-    def onZLayerModeChanged(self, mode: str) -> None:
+    def onLoadFlatfield(self) -> None: # Kept for now, can be removed if button is fully replaced
+        directory = QFileDialog.getExistingDirectory(self, "Select Flatfield Folder")
+        if directory:
+            path_obj = pathlib.Path(directory)
+            manifest_path = path_obj / "flatfield_manifest.json"
+            if manifest_path.exists():
+                self.flatfield_manifest = manifest_path
+                self.loadFlatfieldDropArea.setText(f"Loaded: {manifest_path.name}")
+                self.loadFlatfieldDropArea.setStyleSheet("""
+                    QLabel {
+                        border: 2px solid green;
+                        border-radius: 5px;
+                        background-color: #e0ffe0;
+                    }
+                """)
+            else:
+                QMessageBox.warning(self, "Input Error", "No flatfield_manifest.json found in the selected directory.")
+                self.flatfield_manifest = None
+                self.loadFlatfieldDropArea.setText("Drag & Drop Flatfield Directory Here")
+                self.loadFlatfieldDropArea.setStyleSheet("""
+                    QLabel {
+                        border: 2px dashed #aaa;
+                        border-radius: 5px;
+                        background-color: #f0f0f0;
+                    }
+                """)
+        else:
+            self.flatfield_manifest = None
+            self.loadFlatfieldDropArea.setText("Drag & Drop Flatfield Directory Here")
+            self.loadFlatfieldDropArea.setStyleSheet("""
+                QLabel {
+                    border: 2px dashed #aaa;
+                    border-radius: 5px;
+                    background-color: #f0f0f0;
+                }
+            """)
+
+    def onZLayerModeChanged(self, idx: int) -> None:
         """Handle z-layer mode selection changes."""
         # Show/hide specific layer controls based on selection
-        if mode == self.Z_LAYER_MODE_SPECIFIC:
+        if idx == 2:  # "Specific Layer" selected
             self.zLayerSpinLabel.setVisible(True)
             self.zLayerSpinBox.setVisible(True)
         else:
             self.zLayerSpinLabel.setVisible(False)
             self.zLayerSpinBox.setVisible(False)
-
-    def _get_z_layer_selection_value(self) -> Union[ZLayerSelection, int]:
-        """Determines the z-layer selection strategy based on GUI state."""
-        current_mode = self.zLayerModeCombo.currentText()
-
-        if current_mode == self.Z_LAYER_MODE_MIDDLE:
-            return ZLayerSelection.MIDDLE
-        elif current_mode == self.Z_LAYER_MODE_ALL:
-            return ZLayerSelection.ALL
-        elif current_mode == self.Z_LAYER_MODE_SPECIFIC:
-            return self.zLayerSpinBox.value()
-        else:
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Unhandled z-layer selection mode: '{current_mode}'. Please report this bug.",
-            )
-            raise NotImplementedError(
-                f"Unhandled z-layer selection mode: '{current_mode}'"
-            )
 
     def setupConnections(self) -> None:
         assert self.stitcher is not None
@@ -422,7 +466,6 @@ class StitchingGUI(QWidget):
         self.progressBar.hide()
         self.viewBtn.setEnabled(True)
         self.statusLabel.setText("Saving Completed. Ready to View.")
-        self.outputPathEdit.setText(path)
         self.output_path = path
         self.dtype = np.dtype(dtype)
         if dtype == np.uint16:
@@ -439,7 +482,10 @@ class StitchingGUI(QWidget):
         self.statusLabel.setText("Error Occurred!")
 
     def onViewOutput(self) -> None:
-        output_path = self.outputPathEdit.text()
+        output_path = self.output_path
+        if not output_path:
+            QMessageBox.warning(self, "View Error", "No output path set. Has stitching completed?")
+            return
         try:
             viewer = napari.Viewer()
             if ".ome.zarr" in output_path:
@@ -472,11 +518,12 @@ class StitchingGUI(QWidget):
             logging.error(f"An error occurred while opening output in Napari: {e}")
 
     def extractWavelength(self, name: str) -> str | None:
+        # Split the string and find the wavelength number immediately after "Fluorescence"
         parts = name.split()
         if "Fluorescence" in parts:
             index = parts.index("Fluorescence") + 1
             if index < len(parts):
-                return parts[index].split()[0]
+                return parts[index].split()[0]  # Assuming '488 nm Ex' and taking '488'
         for color in ["R", "G", "B"]:
             if color in parts or "full_" + color in parts:
                 return color
