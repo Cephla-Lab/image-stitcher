@@ -6,12 +6,13 @@ import os
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any, ClassVar, Literal, NamedTuple, Optional
-
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, Optional, Union
 import numpy as np
 import pandas as pd
 from dask_image.imread import imread as dask_imread
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, BaseModel, Field, computed_field, ConfigDict
+
+from .z_layer_selection import ZLayerSelector
 
 DATETIME_FORMAT = "%Y-%m-%d_%H-%M-%S.%f"
 
@@ -24,6 +25,11 @@ class OutputFormat(enum.Enum):
 class ScanPattern(enum.Enum):
     unidirectional = "Unidirectional"
     s_pattern = "S-Pattern"
+
+
+class ZLayerSelection(enum.Enum):
+    ALL = "all"
+    MIDDLE = "middle"
 
 
 def input_path_exists(path: str) -> str:
@@ -39,6 +45,11 @@ class StitchingParameters(
     use_attribute_docstrings=True,
 ):
     """Parameters for microscopy image stitching operations."""
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        exclude={"z_layer_selector"},
+        json_schema_extra={"exclude": {"z_layer_selector"}}
+    )
 
     input_folder: Annotated[str, AfterValidator(input_path_exists)]
     """A folder on the local machine containing an image acqusition.
@@ -58,8 +69,26 @@ class StitchingParameters(
     other row goes the other direction.
     """
 
+    z_layer_selection: Union[ZLayerSelection, int] = ZLayerSelection.MIDDLE
+    """Strategy for selecting z-layers to stitch.
+
+    Accepts:
+    - `ZLayerSelection.ALL` (input as string: "all"): Stitch all z-layers.
+    - `ZLayerSelection.MIDDLE` (input as string: "middle"): Stitch only the middle z-layer from the stack (default).
+    - An integer (e.g., `2`; or input as string like "2"): Stitch a specific z-layer by its 0-based index.
+    
+    When providing via JSON or similar string-based configuration, use "all", "middle", 
+    or a string/number for the layer index (e.g., "0", "1", 2).
+    Internally, these are converted to `ZLayerSelection` enum members or `int`.
+    
+    Future options could include "max_intensity", "user_selected", etc.
+    """
+
     apply_flatfield: bool = False
     """Whether to apply a flatfield correction to the images prior to stitching."""
+
+    apply_mip: bool = False
+    """Whether to apply Maximum Intensity Projection (MIP) to z-stacks before stitching."""
 
     flatfield_manifest: Optional[pathlib.Path] = None
     """If set, a path (folder or .json) from which to load precomputed flatfields."""
@@ -92,9 +121,12 @@ class StitchingParameters(
     default compression algorithm.
     """
 
-    def model_post_init(self, __context: Any) -> None:
-        """Validate and process parameters after initialization."""
-        self.input_folder = os.path.abspath(self.input_folder)
+    @computed_field
+    @property
+    def z_layer_selector(self) -> ZLayerSelector:
+        """The ZLayerSelector instance that will be used for selecting z-layers."""
+        from .z_layer_selection import create_z_layer_selector
+        return create_z_layer_selector(self.z_layer_selection)
 
     @property
     def stitched_folder(self) -> pathlib.Path:
@@ -125,6 +157,16 @@ class StitchingParameters(
         with open(json_path, "w") as f:
             f.write(self.model_dump_json(indent=2))
 
+    def model_dump(self, **kwargs) -> dict:
+        """Override model_dump to exclude z_layer_selector."""
+        kwargs["exclude"] = {"z_layer_selector"}
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs) -> str:
+        """Override model_dump_json to exclude z_layer_selector."""
+        kwargs["exclude"] = {"z_layer_selector"}
+        return super().model_dump_json(**kwargs)
+
 
 @dataclass
 class UnidirectionalScanPatternParams:
@@ -141,13 +183,12 @@ class ReverseRows(enum.Enum):
     odd = "odd"
 
     def is_reversed(self, row_idx: int) -> bool:
-        match self:
-            case ReverseRows.even:
-                return row_idx % 2 == 0
-            case ReverseRows.odd:
-                return row_idx % 2 == 1
-            case _ as unreachable:
-                raise RuntimeError(unreachable)
+        if self == ReverseRows.even:
+            return row_idx % 2 == 0
+        elif self == ReverseRows.odd:
+            return row_idx % 2 == 1
+        else:
+            raise RuntimeError(f"Unexpected ReverseRows value: {self}")
 
 
 @dataclass
@@ -164,13 +205,12 @@ ScanParams = UnidirectionalScanPatternParams | SPatternScanParams
 
 
 def default_scan_params(pattern: ScanPattern) -> ScanParams:
-    match pattern:
-        case ScanPattern.unidirectional:
-            return UnidirectionalScanPatternParams()
-        case ScanPattern.s_pattern:
-            return SPatternScanParams()
-        case _ as unreachable:
-            raise RuntimeError(unreachable)
+    if pattern == ScanPattern.unidirectional:
+        return UnidirectionalScanPatternParams()
+    elif pattern == ScanPattern.s_pattern:
+        return SPatternScanParams()
+    else:
+        raise RuntimeError(f"Unexpected ScanPattern value: {pattern}")
 
 
 class MetaKey(NamedTuple):
@@ -388,6 +428,11 @@ class StitchingComputedParameters:
         self.num_z = max_z + 1
         self.num_fovs_per_region = max_fov + 1
 
+        # When MIP is enabled, the number of input z-levels (self.num_z)
+        # remains the count of z-levels in the source data.
+        # The stitching process itself will handle producing a 1 z-level output
+        # if MIP is active.
+
         # Set up image parameters based on the first image
         first_meta = list(self.acquisition_metadata.values())[0]
         first_image = dask_imread(first_meta.filepath)[0]
@@ -562,3 +607,12 @@ class StitchingComputedParameters:
         scans that are not perfectly aligned to a grid.
         """
         return sorted(set(y for _, y in self.xy_positions))
+
+
+class ZLayerSelector(BaseModel):
+    """Base class for z-layer selection strategies."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def select_layers(self, num_layers: int) -> list[int]:
+        """Select which z-layers to use from the stack."""
+        raise NotImplementedError("Subclasses must implement select_layers")

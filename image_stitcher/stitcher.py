@@ -14,13 +14,22 @@ import zarr
 import zarr.storage
 from aicsimageio import types as aics_types
 from aicsimageio.writers import OmeTiffWriter
+from tqdm import tqdm
 
 from . import flatfield_correction
 from .benchmarking_util import debug_timing
 from .parameters import (
+    AcquisitionMetadata,
+    MetaKey,
     OutputFormat,
     StitchingComputedParameters,
     StitchingParameters,
+    ZLayerSelection,
+)
+from .z_layer_selection import (
+    ZLayerSelector,
+    create_z_layer_selector,
+    filter_metadata_by_z_layers,
 )
 
 
@@ -76,6 +85,10 @@ class Stitcher:
         self.callbacks = callbacks
         self.computed_parameters = StitchingComputedParameters(self.params)
         self._paths: Paths | None = None
+        self.tqdm_class = tqdm
+
+        self.metadata: dict[MetaKey, AcquisitionMetadata] = {}
+        self.z_selector: ZLayerSelector | None = None
 
     @property
     def paths(self) -> Paths:
@@ -97,26 +110,27 @@ class Stitcher:
             raise ValueError("Cannot compute MIP from empty tile list")
         
         # Stack all tiles along a new axis (z-axis)
-        if len(tiles[0].shape) == 2:
-            # 2D tiles (grayscale)
-            stacked = np.stack(tiles, axis=0)
-            return np.max(stacked, axis=0)
-        elif len(tiles[0].shape) == 3:
-            # 3D tiles (RGB or multi-channel)
+        if len(tiles[0].shape) in (2, 3):
+            # 2D (grayscale) or 3D (RGB/multi-channel) tiles
             stacked = np.stack(tiles, axis=0)
             return np.max(stacked, axis=0)
         else:
             raise ValueError(f"Unexpected tile shape: {tiles[0].shape}")
 
-    def create_output_array(self, timepoint: int, region: str) -> AnyArray:
+    def create_output_array(
+        self, timepoint: int, region: str, num_z_layers: int
+    ) -> AnyArray:
         width, height = self.computed_parameters.calculate_output_dimensions(
             timepoint, region
         )
+        # Use provided num_z_layers
+        z_dimension = 1 if self.params.apply_mip else num_z_layers
+
         # create zeros with the right shape/dtype per timepoint per region
         output_shape = (
             1,
             self.computed_parameters.num_c,
-            self.computed_parameters.num_z,
+            z_dimension,
             height,
             width,
         )
@@ -235,10 +249,6 @@ class Stitcher:
                 f"Unexpected stitched_region shape: {stitched_region.shape}. Expected 5D array (t, c, z, y, x)."
             )
         if self.params.apply_flatfield:
-            logging.debug(
-                "Loaded flatfield indices: %s",
-                list(self.computed_parameters.flatfields.keys()),
-            )
             logging.debug("Applying flatfield to channel_idx: %s", channel_idx)
             tile = self.apply_flatfield_correction(tile, channel_idx)
 
@@ -270,13 +280,31 @@ class Stitcher:
         """Stitch and save single region for a specific timepoint."""
         start_time = time.time()
         # Initialize output array
-        region_metadata = self.computed_parameters.get_region_metadata(
+        full_metadata_region = self.computed_parameters.get_region_metadata(
             int(timepoint), region
         )
-        stitched_region = self.create_output_array(timepoint, region)
+
+        # Apply z-layer selection
+        assert self.z_selector is not None # Should be initialized in run()
+        selected_z_layers = self.z_selector.select_z_layers(
+            full_metadata_region, self.computed_parameters.num_z
+        )
+        # Create a mapping from original z-index to new z-index
+        # Ensure selected_z_layers are sorted for consistent z_index_map
+        z_index_map = {z: i for i, z in enumerate(sorted(list(selected_z_layers)))}
+        
+        self.metadata = filter_metadata_by_z_layers(full_metadata_region, selected_z_layers)
+        
+        logging.info(
+            f"Using z-layer selection strategy '{self.z_selector.get_name()}': "
+            f"selected layers {sorted(list(selected_z_layers))}"
+        )
+
+        # Create output array with appropriate z-dimension
+        stitched_region = self.create_output_array(timepoint, region, len(selected_z_layers))
         x_min = min(self.computed_parameters.x_positions)
         y_min = min(self.computed_parameters.y_positions)
-        total_tiles = len(region_metadata)
+        total_tiles = len(self.metadata)
         processed_tiles = 0
         logging.info(
             f"Beginning stitching of {total_tiles} tiles for region {region} timepoint {timepoint}"
@@ -286,7 +314,7 @@ class Stitcher:
             logging.info(f"Applying Maximum Intensity Projection (MIP) to z-stacks")
             # Group tiles by (t, region, fov_idx, channel) for MIP processing
             tile_groups = {}
-            for key, tile_info in region_metadata.items():
+            for key, tile_info in self.metadata.items():
                 t, region_name, fov_idx, z_level, channel = key
                 group_key = (t, region_name, fov_idx, channel)
                 if group_key not in tile_groups:
@@ -297,8 +325,8 @@ class Stitcher:
             for group_key, z_tiles in tile_groups.items():
                 t, region_name, fov_idx, channel = group_key
                 
-                # Sort by z_level and load all tiles
-                z_tiles.sort(key=lambda x: x[0])
+                # Load all tiles for the current FOV/channel group
+                # The order of tiles does not matter for compute_mip
                 tiles = []
                 for z_level, tile_info in z_tiles:
                     tile = skimage.io.imread(tile_info.filepath)
@@ -323,7 +351,7 @@ class Stitcher:
                 processed_tiles += len(z_tiles)
         else:
             # Original processing logic for non-MIP case
-            for key, tile_info in region_metadata.items():
+            for key, tile_info in self.metadata.items():
                 t, _, _, z_level, channel = key
                 tile = skimage.io.imread(tile_info.filepath)
 
@@ -334,13 +362,16 @@ class Stitcher:
                     (tile_info.y - y_min) * 1000 / self.computed_parameters.pixel_size_um
                 )
 
-                self.place_tile(stitched_region, tile, x_pixel, y_pixel, z_level, channel)
+                # Map z_level to output array index
+                output_z_level = z_index_map[z_level]
+
+                self.place_tile(stitched_region, tile, x_pixel, y_pixel, output_z_level, channel)
 
                 self.callbacks.update_progress(processed_tiles, total_tiles)
                 processed_tiles += 1
 
         logging.info(
-            f"Time to stitch region {region} timepoint {t}: {time.time() - start_time}"
+            f"Time to stitch region {region} timepoint {timepoint}: {time.time() - start_time}"
         )
         return stitched_region
 
@@ -587,6 +618,47 @@ class Stitcher:
                     )
                 )
 
+            # Validate loaded/computed flatfields
+            if self.computed_parameters.flatfields:
+                expected_shape = (
+                    self.computed_parameters.input_height,
+                    self.computed_parameters.input_width,
+                )
+                # Iterate over a copy of keys for safe removal during iteration
+                for ch_idx in list(self.computed_parameters.flatfields.keys()):
+                    ff_array = self.computed_parameters.flatfields[ch_idx]
+                    if not isinstance(ff_array, np.ndarray):
+                        logging.warning(
+                            f"Flatfield for channel index {ch_idx} is not a numpy array (type: {type(ff_array)}). "
+                            "This flatfield will not be used."
+                        )
+                        del self.computed_parameters.flatfields[ch_idx]
+                        continue # Skip to next flatfield
+
+                    if ff_array.ndim != 2 or ff_array.shape != expected_shape:
+                        logging.warning(
+                            f"Flatfield for channel index {ch_idx} has incorrect shape {ff_array.shape}. "
+                            f"Expected 2D array of shape {expected_shape}. "
+                            "This flatfield will not be used."
+                        )
+                        del self.computed_parameters.flatfields[ch_idx]
+                    # Optional: Add further checks like dtype or value range if necessary
+
+            # Log loaded/computed AND VALIDATED flatfield indices here
+            if self.computed_parameters.flatfields:
+                logging.debug(
+                    "Validated and using flatfields for channel indices: %s",
+                    list(self.computed_parameters.flatfields.keys()),
+                )
+            else:
+                logging.debug(
+                    "Flatfield application was enabled, but no valid flatfields were loaded, computed, or passed validation."
+                )
+
+        # Initialize z-layer selector
+        self.z_selector = create_z_layer_selector(self.params.z_layer_selection)
+        logging.info(f"Using z-layer selection strategy: {self.z_selector.get_name()}")
+
         # Process each timepoint and region
         for timepoint in self.computed_parameters.timepoints:
             timepoint = int(timepoint)
@@ -654,3 +726,17 @@ class Stitcher:
 
         logging.info(f"Post-processing time: {time.time() - post_time}")
         logging.info(f"Total processing time: {time.time() - stime}")
+
+    def stitch_all_regions_and_timepoints(self) -> None:
+        """Main entrypoint to stitch all regions and timepoints based on parameters."""
+        logging.info(
+            f"Stitching all regions and timepoints, output: {self.params.output_format.value}"
+        )
+
+        self.z_selector = create_z_layer_selector(self.params.z_layer_selection)
+        logging.info(f"Using z-layer selection strategy: {self.z_selector.get_name()}")
+
+        # Loop over timepoints and regions
+        for t_idx, t in enumerate(self.computed_parameters.timepoints):
+            for r_idx, region in enumerate(self.computed_parameters.regions):
+                self.stitch_region(t, region)

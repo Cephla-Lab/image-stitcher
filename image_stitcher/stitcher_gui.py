@@ -1,6 +1,7 @@
 import logging
 import sys
-from typing import Any, cast
+import enum
+from typing import Any, cast, Union
 import pathlib
 
 import napari
@@ -13,19 +14,50 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
+    QSpacerItem,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from .parameters import OutputFormat, ScanPattern, StitchingParameters
+from .parameters import (
+    DATETIME_FORMAT,
+    OutputFormat,
+    ScanPattern,
+    StitchingParameters,
+    ZLayerSelection,
+)
 from .stitcher import ProgressCallbacks, Stitcher
 from .registration import register_and_update_coordinates
+
+
+# Enum for Flatfield Modes
+class FlatfieldModeOption(enum.Enum):
+    NONE = "No Flatfield Correction"
+    COMPUTE = "Compute Flatfield Correction"
+    LOAD = "Load Precomputed Flatfield"
+
+def get_flatfield_mode_from_string(combo_value: str) -> FlatfieldModeOption:
+    if combo_value == FlatfieldModeOption.NONE.value:
+        return FlatfieldModeOption.NONE
+    elif combo_value == FlatfieldModeOption.COMPUTE.value:
+        return FlatfieldModeOption.COMPUTE
+    elif combo_value == FlatfieldModeOption.LOAD.value:
+        return FlatfieldModeOption.LOAD
+    else:
+        # This case should ideally not be reached if combo box items are populated from the enum.
+        raise ValueError(f"Unknown flatfield mode string from combo box: '{combo_value}'")
+
 
 # TODO(colin): this is almost but not quite the same as the map in
 # StitchingComputedParameters.get_channel_color. Reconcile the differences?
@@ -85,6 +117,11 @@ class StitchingGUI(QWidget):
     starting_saving = Signal(bool)
     finished_saving = Signal(str, object)
 
+    # Constants for Z-layer selection modes
+    Z_LAYER_MODE_MIDDLE = "Middle Layer"
+    Z_LAYER_MODE_ALL = "All Layers"
+    Z_LAYER_MODE_SPECIFIC = "Specific Layer"
+
     def __init__(self) -> None:
         super().__init__()
         self.stitcher: StitcherThread | None = (
@@ -132,19 +169,42 @@ class StitchingGUI(QWidget):
         # --- Flatfield Correction Options ---
         self.flatfieldModeCombo = QComboBox(self)
         self.flatfieldModeCombo.addItems(
-            [
-                "No Flatfield Correction",
-                "Compute Flatfield Correction",
-                "Load Precomputed Flatfield",
-            ]
+            [mode.value for mode in FlatfieldModeOption]
         )
         self.flatfieldModeCombo.currentIndexChanged.connect(self.onFlatfieldModeChanged)
         self.layout.addWidget(self.flatfieldModeCombo)
 
-        self.loadFlatfieldBtn = QPushButton("Select Flatfield Folder", self)
+        self.loadFlatfieldBtn = QPushButton("Select Flatfield Manifest File", self)
         self.loadFlatfieldBtn.clicked.connect(self.onLoadFlatfield)
         self.loadFlatfieldBtn.setVisible(False)
         self.layout.addWidget(self.loadFlatfieldBtn)  # type: ignore
+
+        # --- Z-Layer Selection Options ---
+        self.zLayerLabel = QLabel("Z-Layer Selection:", self)
+        self.layout.addWidget(self.zLayerLabel)  # type: ignore
+
+        self.zLayerModeCombo = QComboBox(self)
+        self.zLayerModeCombo.addItems([
+            self.Z_LAYER_MODE_MIDDLE,
+            self.Z_LAYER_MODE_ALL,
+            self.Z_LAYER_MODE_SPECIFIC,
+        ])
+        self.zLayerModeCombo.currentTextChanged.connect(self.onZLayerModeChanged)
+        self.layout.addWidget(self.zLayerModeCombo)  # type: ignore
+
+        self.zLayerSpinLabel = QLabel("Select Z-Layer Index:", self)
+        self.zLayerSpinLabel.setVisible(False)
+        self.layout.addWidget(self.zLayerSpinLabel)  # type: ignore
+
+        self.zLayerSpinBox = QSpinBox(self)
+        self.zLayerSpinBox.setMinimum(0)
+        self.zLayerSpinBox.setMaximum(999)  # Will be updated based on actual data
+        self.zLayerSpinBox.setVisible(False)
+        self.layout.addWidget(self.zLayerSpinBox)  # type: ignore
+
+        self.mipCheckbox = QCheckBox("Apply Maximum Intensity Projection (MIP)", self)
+        self.mipCheckbox.setChecked(False)
+        self.layout.addWidget(self.mipCheckbox)
 
         self.pyramidLabel = QLabel(
             "Number of output levels for the image pyramid", self
@@ -195,6 +255,39 @@ class StitchingGUI(QWidget):
         )
         if self.inputDirectory:
             self.inputDirectoryBtn.setText(f"Selected: {self.inputDirectory}")
+            self._discover_dataset_z_count()
+
+    def _discover_dataset_z_count(self) -> None:
+        """Probe the dataset to discover the number of z-layers and update UI accordingly."""
+        try:
+            # Create temporary parameters to probe the dataset
+            temp_params = StitchingParameters(
+                input_folder=self.inputDirectory,
+                output_format=OutputFormat.ome_zarr,  # Doesn't matter for probing
+                scan_pattern=ScanPattern.unidirectional,
+            )
+            temp_stitcher = Stitcher(temp_params)
+            num_z = temp_stitcher.computed_parameters.num_z
+
+            # Update the z-layer spinbox range
+            self.zLayerSpinBox.setMaximum(num_z - 1)
+            self.zLayerSpinLabel.setText(f"Select Z-Layer Index (0-{num_z - 1}):")
+
+            # If middle layer is selected, show which layer that would be
+            if self.zLayerModeCombo.currentText() == self.Z_LAYER_MODE_MIDDLE:
+                middle_idx = num_z // 2
+                self.zLayerLabel.setText(
+                    f"Z-Layer Selection (total layers: {num_z}, middle: {middle_idx}):"
+                )
+            else:
+                self.zLayerLabel.setText(
+                    f"Z-Layer Selection (total layers: {num_z}):"
+                )
+
+        except (FileNotFoundError, ValueError, KeyError) as e:
+            # If we can't probe the dataset due to missing/invalid data, just show the error and continue
+            logging.warning(f"Could not probe dataset for z-layers: {e}")
+            self.zLayerLabel.setText("Z-Layer Selection:")
 
     def onStitchingStart(self) -> None:
         """Start stitching from GUI."""
@@ -204,28 +297,35 @@ class StitchingGUI(QWidget):
             )
             return
 
-        # # In StitchingGUI.onStitchingStart():
-        # if self.outputFormatCombo.currentText() == 'OME-TIFF' and (self.mergeTimepointsCheck.isChecked() or self.mergeRegionsCheck.isChecked()):
-        #     QMessageBox.warning(self, "Format Warning",
-        #                        "Merging operations are only supported for OME-ZARR format. "
-        #                        "These operations will be skipped.")
-
         try:
             # Create parameters from UI state
-            mode = self.flatfieldModeCombo.currentIndex()
-            apply_flatfield = mode in (1, 2)
-            flatfield_manifest = self.flatfield_manifest if mode == 2 else None
+            format_text = self.outputFormatCombo.currentText()
+            if format_text == "OME-ZARR":
+                output_format = OutputFormat.ome_zarr
+            elif format_text == "OME-TIFF":
+                output_format = OutputFormat.ome_tiff
+            else:
+                QMessageBox.critical(self, "Internal Error", f"Invalid output format selected: {format_text}")
+                return
+
+            flatfield_mode = get_flatfield_mode_from_string(self.flatfieldModeCombo.currentText())
+            apply_flatfield = flatfield_mode != FlatfieldModeOption.NONE
+            flatfield_manifest = self.flatfield_manifest if flatfield_mode == FlatfieldModeOption.LOAD else None
+
+            # Determine z-layer selection strategy
+            z_layer_selection_value = self._get_z_layer_selection_value()
+
             params = StitchingParameters(
                 input_folder=self.inputDirectory,
-                output_format=OutputFormat(
-                    "." + self.outputFormatCombo.currentText().lower().replace("-", ".")
-                ),
+                output_format=output_format,
                 scan_pattern=ScanPattern.unidirectional,
                 apply_flatfield=apply_flatfield,
                 flatfield_manifest=flatfield_manifest,
+                z_layer_selection=z_layer_selection_value,
+                apply_mip=self.mipCheckbox.isChecked(),
             )
 
-            if self.outputFormatCombo.currentText() == "OME-ZARR":
+            if output_format == OutputFormat.ome_zarr:
                 if not self.pyramidCheckbox.isChecked():
                     params.num_pyramid_levels = self.pyramidLevels.value()
                 params.output_compression = self.outputCompression.currentText()  # type: ignore
@@ -279,22 +379,59 @@ class StitchingGUI(QWidget):
             self.pyramidLevels.show()
 
     def onFlatfieldModeChanged(self, idx: int) -> None:
-        self.loadFlatfieldBtn.setVisible(idx == 2)
-        if idx != 2:
+        selected_mode_str = self.flatfieldModeCombo.currentText()
+        flatfield_mode_option = get_flatfield_mode_from_string(selected_mode_str)
+
+        self.loadFlatfieldBtn.setVisible(flatfield_mode_option == FlatfieldModeOption.LOAD)
+        
+        if flatfield_mode_option != FlatfieldModeOption.LOAD:
             self.flatfield_manifest = None
-            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
-        elif idx == 2 and self.flatfield_manifest:
-            self.loadFlatfieldBtn.setText(f"Loaded: {self.flatfield_manifest.name}")
+            self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
+        elif self.flatfield_manifest:
+            self.loadFlatfieldBtn.setText(f"Selected: {self.flatfield_manifest.name}")
         else:
-            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
+            self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
 
     def onLoadFlatfield(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Flatfield Folder")
-        if directory:
-            self.flatfield_manifest = pathlib.Path(directory)
-            self.loadFlatfieldBtn.setText(f"Loaded: {self.flatfield_manifest.name}")
+        manifest_filepath_str, _ = QFileDialog.getOpenFileName(
+            self, "Select Flatfield Manifest File", "", "JSON files (*.json)"
+        )
+        if manifest_filepath_str:
+            self.flatfield_manifest = pathlib.Path(manifest_filepath_str)
+            self.loadFlatfieldBtn.setText(f"Selected: {self.flatfield_manifest.name}")
         else:
-            self.loadFlatfieldBtn.setText("Select Flatfield Folder")
+            if not self.flatfield_manifest:
+                self.loadFlatfieldBtn.setText("Select Flatfield Manifest File")
+
+    def onZLayerModeChanged(self, mode: str) -> None:
+        """Handle z-layer mode selection changes."""
+        # Show/hide specific layer controls based on selection
+        if mode == self.Z_LAYER_MODE_SPECIFIC:
+            self.zLayerSpinLabel.setVisible(True)
+            self.zLayerSpinBox.setVisible(True)
+        else:
+            self.zLayerSpinLabel.setVisible(False)
+            self.zLayerSpinBox.setVisible(False)
+
+    def _get_z_layer_selection_value(self) -> Union[ZLayerSelection, int]:
+        """Determines the z-layer selection strategy based on GUI state."""
+        current_mode = self.zLayerModeCombo.currentText()
+
+        if current_mode == self.Z_LAYER_MODE_MIDDLE:
+            return ZLayerSelection.MIDDLE
+        elif current_mode == self.Z_LAYER_MODE_ALL:
+            return ZLayerSelection.ALL
+        elif current_mode == self.Z_LAYER_MODE_SPECIFIC:
+            return self.zLayerSpinBox.value()
+        else:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Unhandled z-layer selection mode: '{current_mode}'. Please report this bug.",
+            )
+            raise NotImplementedError(
+                f"Unhandled z-layer selection mode: '{current_mode}'"
+            )
 
     def setupConnections(self) -> None:
         assert self.stitcher is not None
@@ -376,12 +513,11 @@ class StitchingGUI(QWidget):
             logging.error(f"An error occurred while opening output in Napari: {e}")
 
     def extractWavelength(self, name: str) -> str | None:
-        # Split the string and find the wavelength number immediately after "Fluorescence"
         parts = name.split()
         if "Fluorescence" in parts:
             index = parts.index("Fluorescence") + 1
             if index < len(parts):
-                return parts[index].split()[0]  # Assuming '488 nm Ex' and taking '488'
+                return parts[index].split()[0]
         for color in ["R", "G", "B"]:
             if color in parts or "full_" + color in parts:
                 return color
@@ -415,7 +551,7 @@ class StitchingGUI(QWidget):
                 return
 
             # Create output path for updated coordinates
-            output_csv_path = csv_path / f"{csv_path.stem}{csv_path.suffix}"
+            output_csv_path = csv_path.parent / f"{csv_path.stem}_registered{csv_path.suffix}"
 
             # Start registration in a separate thread
             self.registration_thread = RegistrationThread(
