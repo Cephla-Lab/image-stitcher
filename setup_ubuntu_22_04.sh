@@ -37,6 +37,7 @@ conda env create --file environment.yml
 conda activate image-stitcher
 
 pip install basicpy
+pip install matplotlib
 
 echo "Setup successful, run the following in your shell to activate the conda environment:"
 echo "  source \"${miniconda_base_dir}/bin/activate\" && conda activate image-stitcher"
