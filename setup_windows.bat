@@ -56,6 +56,7 @@ call conda activate image-stitcher
 
 echo Installing basicpy with pip...
 pip install basicpy
+pip install matplotlib
 
 echo.
 echo ========================================
