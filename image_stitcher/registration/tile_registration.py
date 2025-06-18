@@ -1391,7 +1391,7 @@ def process_multiple_timepoints(
         try:
             # Process this timepoint
             updated_coords = register_and_update_coordinates(
-                image_directory=tp_dir,
+                image_directory=base_directory,  # Use base directory instead of timepoint directory
                 csv_path=coords_csv,
                 output_csv_path=coords_csv,  # Overwrite the original
                 channel_pattern=None,  # Auto-detect
