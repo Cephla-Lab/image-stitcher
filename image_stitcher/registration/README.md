@@ -118,7 +118,3 @@ $ python -c "import cupy; print(cupy.__version__)"
 $ pip list | grep cupy
 # cupy-cuda12x    13.4.1
 ```
-
-## Alternative: CPU-Only Mode
-
-If GPU setup is problematic, you can modify the code to run on CPU only by replacing CuPy operations with NumPy equivalents, though this will be significantly slower for large image datasets.
