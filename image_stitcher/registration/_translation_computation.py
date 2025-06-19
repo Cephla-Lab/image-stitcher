@@ -11,8 +11,8 @@ try:
     HAS_CUDA = True
 except ImportError:
     HAS_CUDA = False
-    cp = np  # Use numpy as fallback
-
+    print("No CUDA found, look at README.md in 'registration' directory for installation instructions")
+    
 # Assuming _typing_utils are (or are compatible with):
 # Float = float
 # Int = int
