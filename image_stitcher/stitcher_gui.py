@@ -298,26 +298,31 @@ class StitchingGUI(QWidget):
         self.mainLayout.addWidget(self.zLayerSpinBox, 8, 1)
         self.zLayerSpinBox.setVisible(False) 
 
+        # MIP option
+        self.mipCheckBox = QCheckBox("Apply Maximum Intensity Projection (MIP)")
+        self.mipCheckBox.setToolTip("Apply MIP to z-stacks before stitching")
+        self.mainLayout.addWidget(self.mipCheckBox, 9, 0)
+
         # Status and Progress section
         self.statusLabel = QLabel("Status: Ready", self)
-        self.mainLayout.addWidget(self.statusLabel, 9, 0, 1, 2)  
+        self.mainLayout.addWidget(self.statusLabel, 10, 0, 1, 2)  
 
         self.progressBar = QProgressBar(self)
         self.progressBar.hide()
-        self.mainLayout.addWidget(self.progressBar, 10, 0, 1, 2)  
+        self.mainLayout.addWidget(self.progressBar, 11, 0, 1, 2)  
 
         # Action Buttons
         self.startBtn = QPushButton("Start Stitching", self)
         self.startBtn.clicked.connect(self.onStitchingStart)
-        self.mainLayout.addWidget(self.startBtn, 11, 0)
+        self.mainLayout.addWidget(self.startBtn, 12, 0)
 
         self.viewBtn = QPushButton("View Output in Napari", self)
         self.viewBtn.clicked.connect(self.onViewOutput)
         self.viewBtn.setEnabled(False)
-        self.mainLayout.addWidget(self.viewBtn, 11, 1)
+        self.mainLayout.addWidget(self.viewBtn, 12, 1)
         
         # Add stretch to push everything to the top
-        self.mainLayout.setRowStretch(12, 1) 
+        self.mainLayout.setRowStretch(13, 1) 
 
         self.setWindowTitle("Cephla Image Stitcher")
         self.setGeometry(300, 300, 600, 400)
