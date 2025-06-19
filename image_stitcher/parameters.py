@@ -121,6 +121,13 @@ class StitchingParameters(
     default compression algorithm.
     """
 
+    combine_regions: bool = True
+    """Whether to combine all regions into a single OME-zarr file.
+    
+    If True, all regions will be stitched and saved into a single OME-zarr file
+    with proper coordinate transformations. This is now the default behavior.
+    """
+
     @computed_field
     @property
     def z_layer_selector(self) -> ZLayerSelector:
