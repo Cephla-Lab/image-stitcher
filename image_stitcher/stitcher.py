@@ -623,25 +623,6 @@ class Stitcher:
                         self.callbacks.getting_flatfields,
                     )
                 )
-                
-                # Save the computed flatfields to the acquisition folder
-                if self.computed_parameters.flatfields:
-                    from .flatfield_utils import save_flatfield_correction
-                    
-                    acquisition_folder = pathlib.Path(self.params.input_folder)
-                    flatfield_dir = acquisition_folder / "flatfields"
-                    
-                    try:
-                        manifest_path = save_flatfield_correction(
-                            self.computed_parameters.flatfields,
-                            self.computed_parameters,
-                            flatfield_dir,
-                        )
-                        logging.info(f"Saved computed flatfields to {flatfield_dir}")
-                        logging.info(f"Flatfield manifest created at {manifest_path}")
-                    except Exception as e:
-                        logging.error(f"Failed to save computed flatfields: {e}")
-                        # Continue processing even if saving fails
 
             # Validate loaded/computed flatfields
             if self.computed_parameters.flatfields:
