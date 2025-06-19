@@ -13,6 +13,13 @@ that does this automatically:
 This will set up a conda environment called `image-stitcher` with all the required dependencies,
 and should let you run the examples below when activated with `conda activate image-stitcher`.
 
+If you want to run our registration module (Ubuntu only coompatible with Driver 535.x), run the following shell command.
+```
+./setup_gpu_ubuntu_22_04.sh
+```
+
+This will add GPU compatibility to the environment called `image-stitcher`, and should let you run the registration module of the GUI.
+
 ### Pre-setup for Non-Ubuntu OS
 
 For other environments, you will need to manually replicate the setup steps in `./setup_ubuntu_22_04.sh`.
