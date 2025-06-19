@@ -68,6 +68,12 @@ class Paths:
     def per_timepoint_dir(self, timepoint: int) -> pathlib.Path:
         return self.output_folder / f"{timepoint}_stitched"
 
+    def per_timepoint_combined_output(self, timepoint: int) -> pathlib.Path:
+        return (
+            self.per_timepoint_dir(timepoint)
+            / f"combined_regions{self.output_format.value}"
+        )
+
 
 # We want to choose the type of the stitched array based on the amount of memory
 # available.  If we can fit the whole computation in memory, use numpy for the
@@ -617,6 +623,25 @@ class Stitcher:
                         self.callbacks.getting_flatfields,
                     )
                 )
+                
+                # Save the computed flatfields to the acquisition folder
+                if self.computed_parameters.flatfields:
+                    from .flatfield_utils import save_flatfield_correction
+                    
+                    acquisition_folder = pathlib.Path(self.params.input_folder)
+                    flatfield_dir = acquisition_folder / "flatfields"
+                    
+                    try:
+                        manifest_path = save_flatfield_correction(
+                            self.computed_parameters.flatfields,
+                            self.computed_parameters,
+                            flatfield_dir,
+                        )
+                        logging.info(f"Saved computed flatfields to {flatfield_dir}")
+                        logging.info(f"Flatfield manifest created at {manifest_path}")
+                    except Exception as e:
+                        logging.error(f"Failed to save computed flatfields: {e}")
+                        # Continue processing even if saving fails
 
             # Validate loaded/computed flatfields
             if self.computed_parameters.flatfields:
@@ -670,46 +695,87 @@ class Stitcher:
             t_output_dir = self.paths.per_timepoint_dir(timepoint)
             t_output_dir.mkdir(exist_ok=True, parents=True)
 
-            for region in self.computed_parameters.regions:
-                rtime = time.time()
-                logging.info(f"Processing region {region}...")
+            if self.params.combine_regions and self.params.output_format == OutputFormat.ome_zarr:
+                # Process all regions and combine them into a single OME-zarr
+                logging.info("Combining all regions into a single OME-zarr file")
+                logging.info(f"Found {len(self.computed_parameters.regions)} regions to combine: {self.computed_parameters.regions}")
+                region_data = {}
+                
+                for region in self.computed_parameters.regions:
+                    rtime = time.time()
+                    logging.info(f"Processing region {region}...")
 
-                # Stitch region
-                self.callbacks.starting_stitching()
+                    # Stitch region
+                    self.callbacks.starting_stitching()
+                    stitched_region = self.stitch_region(timepoint, region)
+                    
+                    with debug_timing("rechunking"):
+                        chunk_shapes = self.computed_parameters.chunks
+                        logging.debug(f"Re-chunking region {region} to {chunk_shapes} chunks.")
+                        if isinstance(stitched_region, np.ndarray):
+                            dask_stitched_region = da.from_array(
+                                stitched_region,
+                                chunks=chunk_shapes,
+                                name=f"stitched:t={timepoint},r={region}",
+                            )
+                        elif isinstance(stitched_region, da.Array):
+                            dask_stitched_region = stitched_region.rechunk(chunk_shapes)
+                        else:
+                            dask_stitched_region = stitched_region
 
-                stitched_region = self.stitch_region(timepoint, region)
-                with debug_timing("rechunking"):
-                    chunk_shapes = self.computed_parameters.chunks
-                    logging.debug(
-                        f"Re-chunking to make region has {chunk_shapes} chunks."
-                    )
-                    if isinstance(stitched_region, np.ndarray):
-                        dask_stitched_region = da.from_array(
-                            stitched_region,
-                            chunks=chunk_shapes,
-                            name=f"stitched:t={timepoint},r={region}",
-                        )
-                    elif isinstance(stitched_region, da.Array):
-                        dask_stitched_region = stitched_region.rechunk(chunk_shapes)
-                    else:
-                        # NOTE(imo): Do we need a separate Zarr re-chunk case here?
-                        dask_stitched_region = stitched_region
+                    region_data[region] = dask_stitched_region
+                    logging.info(f"Completed region {region}: {time.time() - rtime}")
 
-                # Save the region
+                # Save all regions combined
                 self.callbacks.starting_saving(False)
-                if self.params.output_format == OutputFormat.ome_zarr:
-                    output_path = self.save_region_ome_zarr(
-                        timepoint, region, dask_stitched_region
-                    )
-                else:
-                    assert self.params.output_format == OutputFormat.ome_tiff
-                    output_path = self.save_region_aics(
-                        timepoint, region, dask_stitched_region
-                    )
+                output_path = self.save_combined_regions_ome_zarr(timepoint, region_data)
+                final_path = output_path
+                logging.info(f"Successfully saved combined regions to: {final_path}")
+                
+            else:
+                # Original behavior: save each region separately
+                logging.info("Saving each region as separate OME-zarr files")
+                for region in self.computed_parameters.regions:
+                    rtime = time.time()
+                    logging.info(f"Processing region {region}...")
 
-                logging.info(
-                    f"Completed region {region} (saved to {output_path}): {time.time() - rtime}"
-                )
+                    # Stitch region
+                    self.callbacks.starting_stitching()
+
+                    stitched_region = self.stitch_region(timepoint, region)
+                    with debug_timing("rechunking"):
+                        chunk_shapes = self.computed_parameters.chunks
+                        logging.debug(
+                            f"Re-chunking to make region has {chunk_shapes} chunks."
+                        )
+                        if isinstance(stitched_region, np.ndarray):
+                            dask_stitched_region = da.from_array(
+                                stitched_region,
+                                chunks=chunk_shapes,
+                                name=f"stitched:t={timepoint},r={region}",
+                            )
+                        elif isinstance(stitched_region, da.Array):
+                            dask_stitched_region = stitched_region.rechunk(chunk_shapes)
+                        else:
+                            # NOTE(imo): Do we need a separate Zarr re-chunk case here?
+                            dask_stitched_region = stitched_region
+
+                    # Save the region
+                    self.callbacks.starting_saving(False)
+                    if self.params.output_format == OutputFormat.ome_zarr:
+                        output_path = self.save_region_ome_zarr(
+                            timepoint, region, dask_stitched_region
+                        )
+                    else:
+                        assert self.params.output_format == OutputFormat.ome_tiff
+                        output_path = self.save_region_aics(
+                            timepoint, region, dask_stitched_region
+                        )
+
+                    logging.info(
+                        f"Completed region {region} (saved to {output_path}): {time.time() - rtime}"
+                    )
+                    final_path = output_path
 
             logging.info(f"Completed timepoint {timepoint}: {time.time() - ttime}")
 
@@ -717,11 +783,7 @@ class Stitcher:
         post_time = time.time()
         self.callbacks.starting_saving(True)
 
-        # Emit finished signal with the last saved path
-        final_path = self.paths.per_timepoint_region_output(
-            self.computed_parameters.timepoints[-1],
-            self.computed_parameters.regions[-1],
-        )
+        # Emit finished signal with the final saved path
         self.callbacks.finished_saving(str(final_path), self.computed_parameters.dtype)
 
         logging.info(f"Post-processing time: {time.time() - post_time}")
@@ -740,3 +802,190 @@ class Stitcher:
         for t_idx, t in enumerate(self.computed_parameters.timepoints):
             for r_idx, region in enumerate(self.computed_parameters.regions):
                 self.stitch_region(t, region)
+
+    def save_combined_regions_ome_zarr(
+        self, timepoint: int, region_data: dict[str, da.Array]
+    ) -> pathlib.Path:
+        """Save all stitched regions combined into a single OME-ZARR file.
+
+        Args:
+            timepoint: The timepoint of the data
+            region_data: Dictionary mapping region names to their stitched arrays
+
+        Returns:
+            path to the saved combined OME-ZARR file
+        """
+        start_time = time.time()
+        output_path = self.paths.per_timepoint_combined_output(timepoint)
+        output_path.parent.mkdir(exist_ok=True, parents=True)
+        logging.info(f"Writing combined regions OME-ZARR to: {output_path}")
+
+        # Calculate the combined dimensions and region positions
+        region_positions = {}
+        total_width = 0
+        max_height = 0
+        
+        # Sort regions for consistent ordering
+        sorted_regions = sorted(region_data.keys())
+        
+        # Calculate positions for each region (arranging horizontally)
+        current_x = 0
+        for region in sorted_regions:
+            region_array = region_data[region]
+            _, _, _, height, width = region_array.shape
+            region_positions[region] = (current_x, 0)  # (x_offset, y_offset)
+            current_x += width
+            total_width += width
+            max_height = max(max_height, height)
+
+        # Get array properties from first region
+        first_region = region_data[sorted_regions[0]]
+        t_dim, c_dim, z_dim, _, _ = first_region.shape
+        
+        # Create combined array shape
+        combined_shape = (t_dim, c_dim, z_dim, max_height, total_width)
+        
+        logging.info(f"Combined array shape: {combined_shape}")
+        logging.info(f"Region positions: {region_positions}")
+
+        # Create zarr store and root group
+        store = ome_zarr.io.parse_url(output_path, mode="w").store
+        root = zarr.group(store=store)
+
+        # Create the combined array
+        combined_array = da.zeros(
+            combined_shape, 
+            dtype=self.computed_parameters.dtype,
+            chunks=self.computed_parameters.chunks
+        )
+
+        # Place each region in the combined array
+        for region in sorted_regions:
+            region_array = region_data[region]
+            x_offset, y_offset = region_positions[region]
+            _, _, _, region_height, region_width = region_array.shape
+            
+            # Place region data in the combined array
+            combined_array[
+                :, :, :, 
+                y_offset:y_offset + region_height, 
+                x_offset:x_offset + region_width
+            ] = region_array
+
+        # Generate pyramid
+        pyramid = self.generate_pyramid(
+            combined_array, self.computed_parameters.num_pyramid_levels
+        )
+
+        # Define coordinate transforms
+        transforms: list[list[dict[str, Any]]] = []
+        for level in range(self.computed_parameters.num_pyramid_levels):
+            scale = 2**level
+            transforms.append(
+                [
+                    {
+                        "type": "scale",
+                        "scale": [
+                            1,  # time
+                            1,  # channels
+                            float(
+                                self.computed_parameters.acquisition_params.get(
+                                    "dz(um)", 1.0
+                                )
+                            ),  # z in microns
+                            float(
+                                self.computed_parameters.pixel_size_um * scale
+                            ),  # y with pyramid scaling
+                            float(
+                                self.computed_parameters.pixel_size_um * scale
+                            ),  # x with pyramid scaling
+                        ],
+                    }
+                ]
+            )
+
+        # Configure storage options
+        storage_opts = {
+            "chunks": self.computed_parameters.chunks,
+            "compressor": self.params.output_compression,
+        }
+
+        datasets = []
+        
+        # Write pyramid levels
+        with debug_timing("write combined image data pyramid"):
+            for pyramid_idx in range(len(pyramid)):
+                da.to_zarr(
+                    arr=pyramid[pyramid_idx],
+                    url=root.store,
+                    component=str(pathlib.Path(root.path) / str(pyramid_idx)),
+                    storage_options=storage_opts,
+                    compressor=storage_opts.get(
+                        "compressor", zarr.storage.default_compressor
+                    ),
+                    dimension_separator="/",
+                    compute=True,
+                )
+                datasets.append({"path": str(pyramid_idx)})
+
+        # Validate and set coordinate transformations
+        fmt = ome_zarr.format.CurrentFormat()
+        fmt.validate_coordinate_transformations(
+            len(pyramid[0].shape), len(pyramid), transforms
+        )
+
+        for dataset, transform in zip(datasets, transforms):
+            dataset["coordinateTransformations"] = transform
+
+        # Write multiscale metadata
+        with debug_timing(".write_multiscale_metadata()"):
+            ome_zarr.writer.write_multiscales_metadata(
+                group=root,
+                datasets=datasets,
+                fmt=fmt,
+                axes=[
+                    {"name": "t", "type": "time", "unit": "second"},
+                    {"name": "c", "type": "channel"},
+                    {"name": "z", "type": "space", "unit": "micrometer"},
+                    {"name": "y", "type": "space", "unit": "micrometer"},
+                    {"name": "x", "type": "space", "unit": "micrometer"},
+                ],
+                name=f"combined_regions_t{timepoint}",
+            )
+
+        # Add OMERO metadata
+        root.attrs["omero"] = {
+            "id": 1,
+            "name": f"combined_regions_t{timepoint}",
+            "version": "0.4",
+            "channels": [
+                {
+                    "label": name,
+                    "color": f"{color:06X}",
+                    "window": {
+                        "start": 0,
+                        "end": np.iinfo(self.computed_parameters.dtype).max,
+                        "min": 0,
+                        "max": np.iinfo(self.computed_parameters.dtype).max,
+                    },
+                    "active": True,
+                    "coefficient": 1,
+                    "family": "linear",
+                }
+                for name, color in zip(
+                    self.computed_parameters.monochrome_channels,
+                    self.computed_parameters.monochrome_colors,
+                )
+            ],
+        }
+        
+        # Add region metadata to track region positions
+        root.attrs["regions"] = {
+            "region_positions": region_positions,
+            "region_names": sorted_regions,
+            "arrangement": "horizontal"  # Could be extended to support other arrangements
+        }
+
+        logging.info(f"Successfully saved combined OME-ZARR to: {output_path}")
+        logging.info(f"Time to save combined regions timepoint {timepoint}: {time.time() - start_time}")
+        return output_path
