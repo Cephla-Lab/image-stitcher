@@ -58,6 +58,13 @@ echo Installing basicpy with pip...
 pip install basicpy
 
 echo.
+echo Fixing aicsimageio dependency conflicts...
+echo Installing compatible versions of dependencies...
+pip install --force-reinstall "tifffile>=2021.8.30,<2023.3.15" "xmlschema<2.0.0" "lxml<5.0.0" "xarray>=0.16.1,<2023.02.0"
+echo Reinstalling aicsimageio with compatible dependencies...
+pip install --force-reinstall aicsimageio==4.10.0
+
+echo.
 echo ========================================
 echo Setup successful!
 echo.
