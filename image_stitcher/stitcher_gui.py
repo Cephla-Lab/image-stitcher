@@ -298,26 +298,34 @@ class StitchingGUI(QWidget):
         self.mainLayout.addWidget(self.zLayerSpinBox, 8, 1)
         self.zLayerSpinBox.setVisible(False) 
 
+        # Combine regions option
+        self.combineRegionsLabel = QLabel("Combine Regions:", self)
+        self.mainLayout.addWidget(self.combineRegionsLabel, 9, 0)
+        self.combineRegionsCheckBox = QCheckBox("Combine all regions into single OME-zarr")
+        self.combineRegionsCheckBox.setToolTip("Save all regions in a single OME-zarr file instead of separate files")
+        self.combineRegionsCheckBox.setChecked(True)  # Default to True
+        self.mainLayout.addWidget(self.combineRegionsCheckBox, 9, 1)
+
         # Status and Progress section
         self.statusLabel = QLabel("Status: Ready", self)
-        self.mainLayout.addWidget(self.statusLabel, 9, 0, 1, 2)  
+        self.mainLayout.addWidget(self.statusLabel, 10, 0, 1, 2)  
 
         self.progressBar = QProgressBar(self)
         self.progressBar.hide()
-        self.mainLayout.addWidget(self.progressBar, 10, 0, 1, 2)  
+        self.mainLayout.addWidget(self.progressBar, 11, 0, 1, 2)  
 
         # Action Buttons
         self.startBtn = QPushButton("Start Stitching", self)
         self.startBtn.clicked.connect(self.onStitchingStart)
-        self.mainLayout.addWidget(self.startBtn, 11, 0)
+        self.mainLayout.addWidget(self.startBtn, 12, 0)
 
         self.viewBtn = QPushButton("View Output in Napari", self)
         self.viewBtn.clicked.connect(self.onViewOutput)
         self.viewBtn.setEnabled(False)
-        self.mainLayout.addWidget(self.viewBtn, 11, 1)
+        self.mainLayout.addWidget(self.viewBtn, 12, 1)
         
         # Add stretch to push everything to the top
-        self.mainLayout.setRowStretch(12, 1) 
+        self.mainLayout.setRowStretch(13, 1) 
 
         self.setWindowTitle("Cephla Image Stitcher")
         self.setGeometry(300, 300, 600, 400)
@@ -425,6 +433,7 @@ class StitchingGUI(QWidget):
                 flatfield_manifest=flatfield_manifest,
                 z_layer_selection=z_layer_selection,
                 apply_mip=(z_layer_mode == 3),  # Set apply_mip based on the combo box index
+                combine_regions=self.combineRegionsCheckBox.isChecked(),
             )
 
             # Check if registration is requested
@@ -694,7 +703,7 @@ class StitchingGUI(QWidget):
     def onRegistrationStart(self) -> None:
         """Start registration from GUI."""
         if not self.inputDirectory:
-            QMessageBox.warning(
+            QMessageBox.warning
                 self, "Input Error", "Please select an input directory."
             )
             return
