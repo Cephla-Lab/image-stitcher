@@ -11,7 +11,6 @@ from .tile_registration import (
     DEFAULT_FOV_RE,
     extract_tile_indices
 )
-from .registration_viz import visualize_registration
 from ._constrained_refinement import refine_translations
 from ._global_optimization import compute_final_position
 
