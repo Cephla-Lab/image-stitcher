@@ -102,6 +102,8 @@ def set_tensor_backend(engine: Optional[str] = None) -> TensorBackend:
 DEFAULT_FOV_RE = re.compile(r"(?P<region>\w+)_(?P<fov>0|[1-9]\d*)_(?P<z_level>\d+)_", re.I)
 # Additional regex for multi-page TIFF files with "_stack" suffix
 MULTIPAGE_FOV_RE = re.compile(r"(?P<region>\w+)_(?P<fov>0|[1-9]\d*)_stack", re.I)
+# Additional regex for OME-TIFF files (region_fov.ome.tif)
+OME_TIFF_FOV_RE = re.compile(r"(?P<region>\w+)_(?P<fov>0|[1-9]\d*)\.ome\.tiff?$", re.I)
 DEFAULT_FOV_COL = "fov"
 DEFAULT_X_COL = "x (mm)"
 DEFAULT_Y_COL = "y (mm)"
@@ -129,7 +131,7 @@ DEFAULT_Y_COL = "y (mm)"
 # but should be replaced with the proper abstraction in a future refactor.
 
 def parse_filename_fov_info(filename: str) -> Optional[Dict[str, Union[str, int]]]:
-    """TEMPORARY HELPER: Parse FOV info from filename, handling both regular and multi-page TIFF formats.
+    """TEMPORARY HELPER: Parse FOV info from filename, handling regular, multi-page, and OME-TIFF formats.
     
     WARNING: This function duplicates regex logic and should be replaced with a proper
     FileFormat abstraction. See TODO comment above for the recommended approach.
@@ -144,7 +146,16 @@ def parse_filename_fov_info(filename: str) -> Optional[Dict[str, Union[str, int]
     Optional[Dict[str, Union[str, int]]]
         Dictionary with 'region', 'fov', and optionally 'z_level' keys, or None if no match
     """
-    # Try regular TIFF pattern first
+    # Try OME-TIFF pattern first (most specific)
+    m = OME_TIFF_FOV_RE.search(filename)
+    if m:
+        return {
+            'region': m.group('region'),
+            'fov': int(m.group('fov'))
+            # No z_level in OME-TIFF filenames - it's stored inside the file
+        }
+    
+    # Try regular TIFF pattern
     m = DEFAULT_FOV_RE.search(filename)
     if m:
         return {
@@ -1422,12 +1433,21 @@ def read_tiff_images_for_region(
             if fov_info:
                 try:
                     fov = fov_info['fov']
-                    # For multi-page TIFFs, z_level is not in filename
-                    if 'z_level' in fov_info:
+                    
+                    # Check if this is an OME-TIFF or multi-page TIFF
+                    is_ome_tiff = path.name.lower().endswith('.ome.tif') or path.name.lower().endswith('.ome.tiff')
+                    is_multipage = '_stack' in path.name.lower()
+                    
+                    if is_ome_tiff or is_multipage:
+                        # For OME-TIFF and multi-page TIFF, z-selection happens during loading
+                        # Just use the target z_slice_to_keep as a placeholder
+                        z_level = z_slice_to_keep if z_slice_to_keep is not None else 0
+                    elif 'z_level' in fov_info:
+                        # Regular TIFF with z_level in filename
                         z_level = fov_info['z_level']
                     else:
-                        # Multi-page TIFF: use z_slice_to_keep as the target z-level
-                        z_level = z_slice_to_keep if z_slice_to_keep is not None else 0
+                        # Shouldn't happen, but default to 0
+                        z_level = 0
                     
                     if fov not in fov_to_files_map:
                         fov_to_files_map[fov] = []
@@ -1484,8 +1504,9 @@ def read_tiff_images_for_region(
 def load_single_image(path: Path) -> Tuple[str, Optional[np.ndarray]]:
     """Load a single image with error handling.
     
-    For multi-page TIFF files (containing "_stack" in name), extracts the middle z-slice
-    to match the default stitching behavior.
+    Handles regular TIFF, multi-page TIFF, and OME-TIFF files.
+    For multi-page TIFF files (containing "_stack" in name), extracts the middle z-slice.
+    For OME-TIFF files, extracts middle z-slice from first channel.
     
     Parameters
     ----------
@@ -1498,6 +1519,26 @@ def load_single_image(path: Path) -> Tuple[str, Optional[np.ndarray]]:
         Tuple of (filename, image_array) or (filename, None) if loading failed
     """
     try:
+        # Check if this is an OME-TIFF file
+        if path.name.lower().endswith('.ome.tif') or path.name.lower().endswith('.ome.tiff'):
+            # Use the image loader for OME-TIFF
+            try:
+                from ..image_loaders import create_image_loader
+                loader = create_image_loader(path, format_hint='ome_tiff')
+                meta = loader.metadata
+                
+                # Use first channel, middle z-slice for registration
+                channel_idx = 0
+                z_idx = meta['num_z'] // 2 if meta['num_z'] > 1 else 0
+                
+                image = loader.read_slice(channel=channel_idx, z=z_idx)
+                logger.debug(f"Loaded OME-TIFF {path.name}: channel {channel_idx}, z-slice {z_idx}/{meta['num_z']}")
+                return path.name, image
+            except Exception as e:
+                logger.warning(f"Failed to load OME-TIFF with image_loaders, trying tifffile: {e}")
+                # Fallback to tifffile
+                pass
+        
         # Check if this is a multi-page TIFF
         if "_stack" in path.name:
             # Multi-page TIFF: extract middle z-slice to match stitching behavior
@@ -1740,7 +1781,13 @@ def select_channel_pattern(directory: Union[str, Path]) -> str:
         print(f"Selected brightfield channel: {pattern}")
         return pattern
     
-    # If no specific patterns found, use all TIFF files
+    # If no specific patterns found, check for OME-TIFF files first, then regular TIFF
+    # Check for OME-TIFF files (.ome.tif or .ome.tiff)
+    ome_tiff_files = [f for f in directory.iterdir() if f.suffix.lower() in ('.tif', '.tiff') and '.ome.' in f.name.lower()]
+    if ome_tiff_files:
+        print("Info: Detected OME-TIFF files, using *.ome.tif pattern")
+        return "*.ome.tif"
+    
     print("Warning: No specific channel pattern detected, using all TIFF files")
     return "*.tiff"
 
