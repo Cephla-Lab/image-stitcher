@@ -118,12 +118,23 @@ class Stitcher:
             raise ValueError(f"Unexpected tile shape: {tiles[0].shape}")
 
     def load_image(self, tile_info) -> np.ndarray:
-        """Load an image from file, handling both single files and multi-page TIFF files."""
-        if hasattr(tile_info, 'frame_idx') and tile_info.frame_idx > 0:
-            # Multi-page TIFF file
-            import tifffile
-            with tifffile.TiffFile(tile_info.filepath) as tif:
-                return tif.pages[tile_info.frame_idx].asarray()
+        """Load an image from file, handling single files, multi-page TIFF, and OME-TIFF files."""
+        if hasattr(tile_info, 'frame_idx') and tile_info.frame_idx is not None:
+            # Check if it's an OME-TIFF (frame_idx is tuple) or multi-page TIFF (frame_idx is int)
+            if isinstance(tile_info.frame_idx, tuple):
+                # OME-TIFF: frame_idx is (channel_idx, z_idx)
+                from .image_loaders import create_image_loader
+                loader = create_image_loader(tile_info.filepath, format_hint='ome_tiff')
+                channel_idx, z_idx = tile_info.frame_idx
+                return loader.read_slice(channel=channel_idx, z=z_idx)
+            elif tile_info.frame_idx > 0:
+                # Multi-page TIFF file: frame_idx is page number
+                import tifffile
+                with tifffile.TiffFile(tile_info.filepath) as tif:
+                    return tif.pages[tile_info.frame_idx].asarray()
+            else:
+                # frame_idx is 0, treat as single file
+                return skimage.io.imread(tile_info.filepath)
         else:
             # Single file
             return skimage.io.imread(tile_info.filepath)
