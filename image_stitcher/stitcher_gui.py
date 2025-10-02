@@ -236,47 +236,58 @@ class StitchingGUI(QWidget):
         self.inputDirDropArea.path_dropped.connect(self.onInputDirectoryDropped)
         self.mainLayout.addWidget(self.inputDirDropArea, 0, 1)
 
-        # FOV Registration section (previously register button)
-        self.registrationLabel = QLabel("FOV Registration:", self)
-        self.mainLayout.addWidget(self.registrationLabel, 1, 0)
-        self.registrationCombo = QComboBox(self)
-        self.registrationCombo.addItems(["No", "Yes"])
-        self.mainLayout.addWidget(self.registrationCombo, 1, 1)
+        # Registration section
+        row = 1
         
-        # Tensor Backend section (conditional on registration)
+        # Compute Backend
         self.tensorBackendLabel = QLabel("Compute Backend:", self)
-        self.mainLayout.addWidget(self.tensorBackendLabel, 2, 0)
+        self.mainLayout.addWidget(self.tensorBackendLabel, row, 0)
         self.tensorBackendCombo = QComboBox(self)
-        self.mainLayout.addWidget(self.tensorBackendCombo, 2, 1)
+        self.mainLayout.addWidget(self.tensorBackendCombo, row, 1)
+        row += 1
         
-        # Initialize backend options and setup connections
+        # Initialize backend options
         self._populate_tensor_backend_options()
-        self._setup_registration_connections()
+        
+        # Registration status indicator
+        self.registrationStatusLabel = QLabel("Status: Not registered", self)
+        self.mainLayout.addWidget(self.registrationStatusLabel, row, 0, 1, 2)
+        row += 1
+        
+        # Registration button
+        self.registerBtn = QPushButton("Run Registration", self)
+        self.registerBtn.clicked.connect(self.onRegistrationStart)
+        self.registerBtn.setEnabled(False)  # Disabled until input directory is selected
+        self.mainLayout.addWidget(self.registerBtn, row, 0, 1, 2)
+        row += 1
 
         # Output format section
         self.outputFormatLabel = QLabel("Output Format:", self)
-        self.mainLayout.addWidget(self.outputFormatLabel, 3, 0)
+        self.mainLayout.addWidget(self.outputFormatLabel, row, 0)
         self.outputFormatCombo = QComboBox(self)
         self.outputFormatCombo.addItems(["OME-ZARR"])  # Removed OME-TIFF as requested
-        self.mainLayout.addWidget(self.outputFormatCombo, 3, 1)
+        self.mainLayout.addWidget(self.outputFormatCombo, row, 1)
+        row += 1
 
         # Output compression section
         self.compressionLabel = QLabel("Output Compression:", self)
-        self.mainLayout.addWidget(self.compressionLabel, 4, 0)
+        self.mainLayout.addWidget(self.compressionLabel, row, 0)
         self.outputCompression = QComboBox(self)
         self.outputCompression.addItems(["default", "none"])
-        self.mainLayout.addWidget(self.outputCompression, 4, 1)
+        self.mainLayout.addWidget(self.outputCompression, row, 1)
+        row += 1
 
         # Pyramid checkbox section - now with checkbox on the right
         self.pyramidLabel = QLabel("Infer levels for output image pyramid:", self)
-        self.mainLayout.addWidget(self.pyramidLabel, 5, 0)
+        self.mainLayout.addWidget(self.pyramidLabel, row, 0)
         self.pyramidCheckbox = QCheckBox(self)
         self.pyramidCheckbox.setChecked(True)
-        self.mainLayout.addWidget(self.pyramidCheckbox, 5, 1)
+        self.mainLayout.addWidget(self.pyramidCheckbox, row, 1)
+        row += 1
 
         # Flatfield Correction section
         self.flatfieldModeLabel = QLabel("Correction Mode:", self)
-        self.mainLayout.addWidget(self.flatfieldModeLabel, 6, 0)
+        self.mainLayout.addWidget(self.flatfieldModeLabel, row, 0)
         self.flatfieldModeCombo = QComboBox(self)
         self.flatfieldModeCombo.addItems(
             [
@@ -286,54 +297,62 @@ class StitchingGUI(QWidget):
             ]
         )
         self.flatfieldModeCombo.currentIndexChanged.connect(self.onFlatfieldModeChanged)
-        self.mainLayout.addWidget(self.flatfieldModeCombo, 6, 1)
+        self.mainLayout.addWidget(self.flatfieldModeCombo, row, 1)
+        row += 1
 
         self.flatfieldLoadLabel = QLabel("Load Flatfield:", self)
-        self.mainLayout.addWidget(self.flatfieldLoadLabel, 7, 0)
+        self.mainLayout.addWidget(self.flatfieldLoadLabel, row, 0)
         self.flatfieldLoadLabel.setVisible(False) # Initially hidden
         self.loadFlatfieldDropArea = DragDropArea("Drag & Drop Flatfield Directory Here", self)
         self.loadFlatfieldDropArea.path_dropped.connect(self.onLoadFlatfieldDropped)
-        self.mainLayout.addWidget(self.loadFlatfieldDropArea, 7, 1)
+        self.mainLayout.addWidget(self.loadFlatfieldDropArea, row, 1)
         self.loadFlatfieldDropArea.setVisible(False) # Initially hidden
+        row += 1
 
         # Z-Stack Options section
         self.zLayerLabel = QLabel("Processing Mode:", self)
-        self.mainLayout.addWidget(self.zLayerLabel, 8, 0)
+        self.mainLayout.addWidget(self.zLayerLabel, row, 0)
         self.zLayerModeCombo = QComboBox(self)
         self.zLayerModeCombo.addItems(["Middle Layer", "All Layers", "Specific Layer", "Maximum Intensity Projection (MIP)"])
         self.zLayerModeCombo.currentIndexChanged.connect(self.onZLayerModeChanged)
-        self.mainLayout.addWidget(self.zLayerModeCombo, 8, 1)
+        self.mainLayout.addWidget(self.zLayerModeCombo, row, 1)
+        row += 1
 
         self.zLayerSpinLabel = QLabel("Select Z-Layer Index:", self)
-        self.mainLayout.addWidget(self.zLayerSpinLabel, 9, 0)
+        self.mainLayout.addWidget(self.zLayerSpinLabel, row, 0)
         self.zLayerSpinLabel.setVisible(False) 
 
         self.zLayerSpinBox = QSpinBox(self)
         self.zLayerSpinBox.setMinimum(0)
         self.zLayerSpinBox.setMaximum(999)  # Will be updated based on actual data
-        self.mainLayout.addWidget(self.zLayerSpinBox, 9, 1)
+        self.mainLayout.addWidget(self.zLayerSpinBox, row, 1)
         self.zLayerSpinBox.setVisible(False) 
+        row += 1
 
         # Status and Progress section
         self.statusLabel = QLabel("Status: Ready", self)
-        self.mainLayout.addWidget(self.statusLabel, 10, 0, 1, 2)  
+        self.mainLayout.addWidget(self.statusLabel, row, 0, 1, 2)
+        row += 1
 
         self.progressBar = QProgressBar(self)
         self.progressBar.hide()
-        self.mainLayout.addWidget(self.progressBar, 11, 0, 1, 2)  
+        self.mainLayout.addWidget(self.progressBar, row, 0, 1, 2)
+        row += 1
 
         # Action Buttons
         self.startBtn = QPushButton("Start Stitching", self)
         self.startBtn.clicked.connect(self.onStitchingStart)
-        self.mainLayout.addWidget(self.startBtn, 12, 0)
+        self.startBtn.setEnabled(False)  # Disabled until input directory is selected
+        self.mainLayout.addWidget(self.startBtn, row, 0)
 
         self.viewBtn = QPushButton("View Output", self)
         self.viewBtn.clicked.connect(self.onViewOutput)
         self.viewBtn.setEnabled(False)
-        self.mainLayout.addWidget(self.viewBtn, 12, 1)
+        self.mainLayout.addWidget(self.viewBtn, row, 1)
+        row += 1
         
         # Add stretch to push everything to the top
-        self.mainLayout.setRowStretch(13, 1) 
+        self.mainLayout.setRowStretch(row, 1) 
 
         self.setWindowTitle("Cephla Image Stitcher")
         self.setGeometry(300, 300, 600, 400)
@@ -357,6 +376,13 @@ class StitchingGUI(QWidget):
             return
 
         self.inputDirectory = str(acquisition_dir)
+        
+        # Enable registration and stitching buttons
+        self.registerBtn.setEnabled(True)
+        self.startBtn.setEnabled(True)
+        
+        # Reset registration status
+        self.registrationStatusLabel.setText("Status: Not registered")
         
         # Detect and display the acquisition format
         try:
@@ -450,7 +476,7 @@ class StitchingGUI(QWidget):
             self.zLayerLabel.setText("Processing Mode:")
 
     def onStitchingStart(self) -> None:
-        """Start stitching from GUI."""
+        """Start stitching from GUI (registration is separate)."""
         if not self.inputDirectory:
             QMessageBox.warning(
                 self, "Input Error", "Please select an input directory."
@@ -491,19 +517,12 @@ class StitchingGUI(QWidget):
                 apply_mip=(z_layer_mode == 3),  # Set apply_mip based on the combo box index
             )
 
-            # Check if registration is requested and available
-            perform_registration = (
-                self.registrationCombo.currentText() == "Yes" and 
-                self._has_registration_backends and
-                self.tensorBackendCombo.isEnabled()
-            )
-
-            # Create and configure the stitcher thread
+            # Create and configure the stitcher thread (no registration - that's separate)
             self.stitcher = StitcherThread(
                 params=params,
-                perform_registration=perform_registration,
+                perform_registration=False,  # Registration is now a separate button
                 image_directory=self.inputDirectory,
-                tensor_backend_engine=self._get_selected_tensor_backend()
+                tensor_backend_engine=None  # Not needed for stitching
             )
 
             # Set up callbacks
@@ -521,10 +540,7 @@ class StitchingGUI(QWidget):
             self.setupConnections()
 
             # Start processing
-            if perform_registration:
-                self.statusLabel.setText("Status: Registering images...")
-            else:
-                self.statusLabel.setText("Status: Stitching...")
+            self.statusLabel.setText("Status: Stitching...")
             self.stitcher.start()
             self.progressBar.show()
 
@@ -654,7 +670,7 @@ class StitchingGUI(QWidget):
             self.zLayerSpinBox.setVisible(False)
 
     def _populate_tensor_backend_options(self) -> None:
-        """Populate the tensor backend dropdown with available options."""
+        """Populate the tensor backend dropdown with available options for registration."""
         # Define backend options with display names
         backend_options = [
             ("Auto (Recommended)", None),
@@ -679,60 +695,13 @@ class StitchingGUI(QWidget):
                     # Backend not available, skip it
                     continue
         
-        # Store if any registration backends are available (excluding NumPy-only)
-        self._has_registration_backends = len([b for b in self._available_backends if b[1] != "numpy"]) > 1
-        
-        # Initially populate based on current registration selection
-        self._update_backend_dropdown()
-
-    def _setup_registration_connections(self) -> None:
-        """Setup connections for registration dropdown changes."""
-        self.registrationCombo.currentIndexChanged.connect(self.onRegistrationChanged)
-        # Set initial state
-        self.onRegistrationChanged(0)  # Start with "No" selected
-
-    def onRegistrationChanged(self, idx: int) -> None:
-        """Handle registration selection changes."""
-        registration_enabled = self.registrationCombo.currentText() == "Yes"
-        
-        if registration_enabled:
-            if self._has_registration_backends:
-                # Show backend dropdown with available options
-                self.tensorBackendLabel.setVisible(True)
-                self.tensorBackendCombo.setVisible(True)
-                self._update_backend_dropdown()
-            else:
-                # Show unavailable message
-                self.tensorBackendLabel.setVisible(True) 
-                self.tensorBackendCombo.setVisible(True)
-                self.tensorBackendCombo.clear()
-                self.tensorBackendCombo.addItem("Registration unavailable")
-                self.tensorBackendCombo.setToolTip(
-                    "Registration requires PyTorch or CuPy. Install with:\n"
-                    "pip install torch torchvision  # For PyTorch\n"
-                    "pip install cupy-cuda12x  # For CuPy (NVIDIA GPU)"
-                )
-                self.tensorBackendCombo.setEnabled(False)
-        else:
-            # Hide backend selection when registration is disabled
-            self.tensorBackendLabel.setVisible(False)
-            self.tensorBackendCombo.setVisible(False)
-
-    def _update_backend_dropdown(self) -> None:
-        """Update the backend dropdown with available options."""
-        self.tensorBackendCombo.clear()
-        self.tensorBackendCombo.setEnabled(True)
+        # Populate the backend dropdown
         self._backend_mapping = {}
-        
         for i, (display_name, engine_name) in enumerate(self._available_backends):
             self.tensorBackendCombo.addItem(display_name)
             self._backend_mapping[i] = engine_name
         
-        # Connect change handler if not already connected
-        try:
-            self.tensorBackendCombo.currentIndexChanged.disconnect()
-        except:
-            pass
+        # Connect change handler
         self.tensorBackendCombo.currentIndexChanged.connect(self.onTensorBackendChanged)
         
         # Set default to auto
@@ -1123,19 +1092,27 @@ class StitchingGUI(QWidget):
             return
 
         try:
+            # Get selected backend
+            tensor_backend_engine = self._get_selected_tensor_backend()
+            
             # Start registration in a separate thread
             self.registration_thread = RegistrationThread(
                 image_directory=self.inputDirectory,
                 csv_path=None,  # Not needed as process_multiple_timepoints handles this
-                output_csv_path=None  # Not needed as process_multiple_timepoints handles this
+                output_csv_path=None,  # Not needed as process_multiple_timepoints handles this
+                tensor_backend_engine=tensor_backend_engine
             )
             self.registration_thread.error.connect(self.onRegistrationError)
             self.registration_thread.finished.connect(self.onRegistrationFinished)
 
             # Update UI
             self.statusLabel.setText("Status: Registering images...")
+            self.registrationStatusLabel.setText("Status: Registering...")
             self.progressBar.setRange(0, 0)  # Indeterminate progress
             self.progressBar.show()
+            
+            # Disable register button while processing
+            self.registerBtn.setEnabled(False)
 
             # Start registration
             self.registration_thread.start()
@@ -1143,18 +1120,58 @@ class StitchingGUI(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Registration Error", str(e))
             self.statusLabel.setText("Status: Error Encountered")
+            self.registrationStatusLabel.setText("Status: Registration failed")
 
     def onRegistrationError(self, error_msg: str) -> None:
         """Handle registration errors."""
         QMessageBox.critical(self, "Registration Error", error_msg)
         self.statusLabel.setText("Status: Error Encountered")
+        self.registrationStatusLabel.setText("Status: Registration failed")
         self.progressBar.hide()
+        self.registerBtn.setEnabled(True)  # Re-enable for retry
 
     def onRegistrationFinished(self) -> None:
         """Handle completion of registration."""
         self.statusLabel.setText("Status: Registration completed")
+        self.registrationStatusLabel.setText("Status: Registration complete")
         self.progressBar.hide()
+        self.registerBtn.setEnabled(True)  # Re-enable for re-registration if needed
         logging.info("Image registration has been completed successfully.")
+
+    def onSetFixedRegistration(self) -> None:
+        """Handle Set Fixed Registration button click."""
+        # TODO: TECHNICAL DEBT - Fixed registration is disabled pending characterization of 
+        # X-Y stage motor drift patterns. The drift accumulation behavior (unidirectional, 
+        # bidirectional, serpentine, etc.) must be determined for each specific microscope 
+        # system before applying fixed shift corrections.
+        
+        QMessageBox.warning(
+            self, 
+            "Feature Disabled", 
+            "Fixed registration is currently disabled.\n\n"
+            "The drift pattern must be determined based on the specific X-Y stage motor "
+            "characteristics of your microscope system.\n\n"
+            "Please use standard registration instead, or contact the development team "
+            "to characterize your system's drift behavior."
+        )
+        self.statusLabel.setText("Status: Fixed registration disabled (technical debt)")
+        return
+        
+        # COMMENTED OUT - Re-enable after characterizing stage motor behavior
+        # if not self.inputDirectory:
+        #     QMessageBox.warning(self, "Input Error", "Please select an input directory.")
+        #     return
+        #     
+        # try:
+        #     from .registration.fixed_registration import launch_fixed_registration
+        #     success = launch_fixed_registration(self.inputDirectory)
+        #     if success:
+        #         self.statusLabel.setText("Status: Fixed registration applied")
+        #     else:
+        #         self.statusLabel.setText("Status: Fixed registration cancelled")
+        # except Exception as e:
+        #     QMessageBox.critical(self, "Fixed Registration Error", str(e))
+        #     self.statusLabel.setText("Status: Error in fixed registration")
 
 
 if __name__ == "__main__":
