@@ -303,8 +303,14 @@ class StitchingComputedParameters:
         self.init_acquisition_parameters()
         self.init_pixel_size()
         
+        # Detect image format
+        self.image_format = self.detect_image_format()
+        
         # Choose parsing method based on detected format
-        if self.is_multipage_tiff_format():
+        if self.image_format == 'ome_tiff':
+            logging.info("Detected OME-TIFF format, using parse_ome_tiff")
+            self.parse_ome_tiff()
+        elif self.image_format == 'multipage_tiff':
             logging.info("Detected multi-page TIFF format, using parse_multipage_tiff")
             self.parse_multipage_tiff()
         else:
@@ -319,25 +325,33 @@ class StitchingComputedParameters:
         ]
         self.timepoints.sort()
 
-    def is_multipage_tiff_format(self) -> bool:
-        """Detect if the acquisition uses multi-page TIFF format."""
-        if not self.timepoints:
-            return False
+    def detect_image_format(self) -> str:
+        """Detect the image format used in the acquisition.
         
-        # Check the first timepoint for multi-page TIFF files
+        Returns:
+            One of: 'ome_tiff', 'multipage_tiff', 'individual_files'
+        """
+        if not self.timepoints:
+            return 'individual_files'
+        
+        # Check the first timepoint directory
         first_timepoint = self.timepoints[0]
         image_folder = pathlib.Path(self.parent.input_folder) / str(first_timepoint)
         
         if not image_folder.exists():
-            return False
+            return 'individual_files'
         
-        # Look for files with "_stack" in the name
-        stack_files = [
-            f for f in image_folder.iterdir()
-            if f.suffix.lower() in (".tiff", ".tif") and "_stack" in f.name
-        ]
-        
-        return len(stack_files) > 0
+        # Use the image_loaders module for detection
+        from .image_loaders import detect_image_format
+        return detect_image_format(image_folder)
+    
+    def is_multipage_tiff_format(self) -> bool:
+        """Check if the acquisition uses multi-page TIFF format (deprecated, use detect_image_format)."""
+        return self.detect_image_format() == 'multipage_tiff'
+    
+    def is_ome_tiff_format(self) -> bool:
+        """Check if the acquisition uses OME-TIFF format."""
+        return self.detect_image_format() == 'ome_tiff'
 
     def init_acquisition_parameters(self) -> None:
         acquistion_params_path = os.path.join(
@@ -364,6 +378,174 @@ class StitchingComputedParameters:
         actual_mag = tube_lens_mm / obj_focal_length_mm
         self.pixel_size_um = sensor_pixel_size_um / actual_mag
         logging.info(f"pixel_size_um: {self.pixel_size_um}")
+
+    def parse_ome_tiff(self) -> None:
+        """Parse OME-TIFF files using the image_loaders module."""
+        from .image_loaders import create_image_loader, parse_ome_tiff_filename
+        
+        input_path = pathlib.Path(self.parent.input_folder)
+        self.acquisition_metadata = {}
+        
+        max_z = 0
+        max_fov = 0
+        
+        # Iterate over each timepoint
+        for timepoint in self.timepoints:
+            image_folder = input_path / str(timepoint)
+            coordinates_path = image_folder / "coordinates.csv"
+            
+            logging.info(f"Processing OME-TIFF timepoint {timepoint}, folder: {image_folder}")
+            
+            try:
+                coordinates_df = pd.read_csv(coordinates_path)
+            except FileNotFoundError:
+                logging.warning(f"coordinates.csv not found for timepoint {timepoint}")
+                continue
+            
+            # Find all OME-TIFF files
+            ome_tiff_files = sorted([
+                f.resolve() for f in image_folder.iterdir()
+                if f.suffix.lower() in (".tif", ".tiff") and 
+                (f.name.lower().endswith('.ome.tif') or f.name.lower().endswith('.ome.tiff'))
+            ])
+            
+            logging.info(f"Found {len(ome_tiff_files)} OME-TIFF files in timepoint {timepoint}")
+            
+            # Process each OME-TIFF file
+            for ome_file in ome_tiff_files:
+                # Parse filename to get region and fov
+                parsed = parse_ome_tiff_filename(ome_file.name)
+                if not parsed:
+                    logging.warning(f"Could not parse OME-TIFF filename: {ome_file.name}")
+                    continue
+                
+                region = parsed['region']
+                fov = parsed['fov']
+                
+                try:
+                    # Create loader for this OME-TIFF file
+                    loader = create_image_loader(ome_file, format_hint='ome_tiff')
+                    meta = loader.metadata
+                    
+                    num_channels = meta['num_channels']
+                    num_z_slices = meta['num_z']
+                    channel_names = meta.get('channel_names') or [f"channel_{i}" for i in range(num_channels)]
+                    
+                    logging.debug(f"OME-TIFF {ome_file.name}: {num_channels} channels, {num_z_slices} z-slices")
+                    
+                    # Get coordinates for this region/fov
+                    fov_coords = coordinates_df[
+                        (coordinates_df['region'] == region) & 
+                        (coordinates_df['fov'] == fov)
+                    ]
+                    
+                    if fov_coords.empty:
+                        logging.warning(f"No coordinates for {region}, FOV {fov}")
+                        continue
+                    
+                    # Process each channel and z-slice combination
+                    for channel_idx in range(num_channels):
+                        channel_name = channel_names[channel_idx]
+                        # Clean up channel name (remove "Channel_" prefix if present)
+                        if channel_name.startswith('Channel_'):
+                            channel_name = channel_name[8:]  # Remove "Channel_" prefix
+                        channel_name = channel_name.replace("_", " ").replace("full ", "full_")
+                        
+                        for z_idx in range(num_z_slices):
+                            # Find coordinate row for this z-level
+                            # In OME-TIFF, z_idx corresponds to z_level in coordinates
+                            coord_rows = fov_coords[fov_coords['z_level'] == z_idx]
+                            
+                            if coord_rows.empty:
+                                # If no exact z_level match, use first row
+                                if len(fov_coords) > 0:
+                                    coord_row = fov_coords.iloc[0]
+                                else:
+                                    logging.warning(f"No coordinates for {region}, FOV {fov}, z={z_idx}")
+                                    continue
+                            else:
+                                coord_row = coord_rows.iloc[0]
+                            
+                            # Create metadata object
+                            # Store channel_idx and z_idx in frame_idx as tuple for later retrieval
+                            meta_obj = AcquisitionMetadata(
+                                filepath=ome_file,
+                                x=coord_row["x (mm)"],
+                                y=coord_row["y (mm)"],
+                                z=coord_row["z (um)"],
+                                channel=channel_name,
+                                z_level=z_idx,
+                                region=region,
+                                fov_idx=fov,
+                                t=timepoint,
+                                frame_idx=(channel_idx, z_idx)  # Store as tuple for OME-TIFF
+                            )
+                            
+                            self.acquisition_metadata[meta_obj.key] = meta_obj
+                            
+                            # Track regions and channels
+                            self.regions.append(region)
+                            self.channel_names.append(channel_name)
+                            
+                            # Update max values
+                            max_z = max(max_z, z_idx)
+                            max_fov = max(max_fov, fov)
+                
+                except Exception as e:
+                    logging.error(f"Error processing OME-TIFF {ome_file.name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+        
+        # Finalize metadata
+        self.regions = sorted(set(self.regions))
+        self.channel_names = sorted(set(self.channel_names))
+        
+        self.num_t = len(self.timepoints)
+        self.num_z = max_z + 1
+        self.num_fovs_per_region = max_fov + 1
+        
+        if not self.acquisition_metadata:
+            logging.error("No OME-TIFF acquisition metadata found!")
+            return
+        
+        # Set up image parameters from first image
+        first_meta = list(self.acquisition_metadata.values())[0]
+        
+        try:
+            loader = create_image_loader(first_meta.filepath, format_hint='ome_tiff')
+            channel_idx, z_idx = first_meta.frame_idx
+            first_image = loader.read_slice(channel=channel_idx, z=z_idx)
+        except Exception as e:
+            logging.error(f"Could not read first OME-TIFF image: {e}")
+            return
+        
+        self.dtype = first_image.dtype
+        if len(first_image.shape) == 2:
+            self.input_height, self.input_width = first_image.shape
+        else:
+            raise ValueError(f"Unexpected OME-TIFF image shape: {first_image.shape}")
+        
+        # Set up chunks
+        self.chunks = (
+            1,
+            1,
+            1,
+            min(self.input_height, self.CHUNK_SIZE_LIMIT_PX),
+            min(self.input_width, self.CHUNK_SIZE_LIMIT_PX),
+        )
+        
+        # Set up monochrome channels (OME-TIFF is already split by channel)
+        self.monochrome_channels = self.channel_names.copy()
+        self.num_c = len(self.monochrome_channels)
+        self.monochrome_colors = [
+            self.get_channel_color(name) for name in self.monochrome_channels
+        ]
+        
+        # Log dataset info
+        logging.info(f"OME-TIFF Dataset - Regions: {self.regions}, Channels: {self.channel_names}")
+        logging.info(f"FOV dimensions: {self.input_height}x{self.input_width}")
+        logging.info(f"{self.num_z} Z levels, {self.num_t} Time points, {self.num_c} Channels")
 
     def parse_acquisition_metadata(self) -> None:
         """Parse image filenames and matche them to coordinates for stitching.
