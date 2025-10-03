@@ -370,15 +370,27 @@ def parse_ome_tiff_filename(filename: str) -> Optional[Dict[str, any]]:
 def detect_image_format(directory: Path) -> str:
     """Detect the image format used in a directory.
     
+    Checks for:
+    1. OME-TIFF files in directory or in parent's ome_tiff/ subdirectory
+    2. Multi-page TIFF files
+    3. Individual TIFF files
+    
     Args:
-        directory: Directory containing image files
+        directory: Directory containing image files (usually a timepoint directory like '0/')
         
     Returns:
         One of: 'ome_tiff', 'multipage_tiff', 'individual_files'
     """
     directory = Path(directory)
     
-    # Check for OME-TIFF files
+    # Check for new OME-TIFF structure: parent/ome_tiff/ directory
+    parent_ome_dir = directory.parent / "ome_tiff"
+    if parent_ome_dir.exists() and parent_ome_dir.is_dir():
+        ome_files = list(parent_ome_dir.glob("*.ome.tif")) + list(parent_ome_dir.glob("*.ome.tiff"))
+        if ome_files:
+            return 'ome_tiff'
+    
+    # Check for OME-TIFF files in current directory (legacy structure)
     ome_tiff_files = list(directory.glob("*.ome.tif")) + list(directory.glob("*.ome.tiff"))
     if ome_tiff_files:
         return 'ome_tiff'
