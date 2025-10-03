@@ -1385,10 +1385,12 @@ def read_tiff_images_for_region(
 ) -> Dict[str, np.ndarray]:
     """Read TIFF images from directory for a specific region.
     
+    Checks both the given directory and parent's ome_tiff/ subdirectory.
+    
     Parameters
     ----------
     directory : Union[str, Path]
-        Directory containing TIFF images
+        Directory containing TIFF images (typically a timepoint directory like '0/')
     pattern : str
         Glob pattern to match TIFF files
     region : str
@@ -1406,10 +1408,18 @@ def read_tiff_images_for_region(
     directory = Path(directory)
     images = {}
     
+    # Check for new OME-TIFF structure first
+    parent_ome_dir = directory.parent / "ome_tiff"
+    if parent_ome_dir.exists() and parent_ome_dir.is_dir():
+        search_dir = parent_ome_dir
+        logger.info(f"Reading images from ome_tiff/ directory: {search_dir}")
+    else:
+        search_dir = directory
+    
     # Get all matching files
-    all_tiff_paths = list(directory.glob(pattern))
+    all_tiff_paths = list(search_dir.glob(pattern))
     if not all_tiff_paths:
-        print(f"No files matching pattern '{pattern}' found in {directory}")
+        print(f"No files matching pattern '{pattern}' found in {search_dir}")
         return images
     
     # Filter for the specific region
@@ -1685,6 +1695,8 @@ def update_stage_coordinates_multi_z(
 def detect_channels(directory: Union[str, Path]) -> Dict[str, List[Path]]:
     """Detect available channels in the directory.
     
+    Checks both the given directory and parent's ome_tiff/ subdirectory.
+    
     Parameters
     ----------
     directory : Union[str, Path]
@@ -1696,7 +1708,13 @@ def detect_channels(directory: Union[str, Path]) -> Dict[str, List[Path]]:
         Dictionary mapping channel type to list of file paths
     """
     directory = Path(directory)
-    tiff_files = list(directory.glob("*.tiff"))
+    
+    # Check for new OME-TIFF structure first
+    parent_ome_dir = directory.parent / "ome_tiff"
+    if parent_ome_dir.exists() and parent_ome_dir.is_dir():
+        tiff_files = list(parent_ome_dir.glob("*.tiff")) + list(parent_ome_dir.glob("*.tif"))
+    else:
+        tiff_files = list(directory.glob("*.tiff")) + list(directory.glob("*.tif"))
     
     # Channel categories
     channels = {
@@ -1735,16 +1753,28 @@ def detect_channels(directory: Union[str, Path]) -> Dict[str, List[Path]]:
 def select_channel_pattern(directory: Union[str, Path]) -> str:
     """Automatically select an appropriate channel pattern.
     
+    Checks both the given directory and parent's ome_tiff/ subdirectory.
+    
     Parameters
     ----------
     directory : Union[str, Path]
-        Directory containing TIFF images
+        Directory containing TIFF images (typically a timepoint directory like '0/')
         
     Returns
     -------
     str
         Glob pattern for the selected channel
     """
+    directory = Path(directory)
+    
+    # Determine which directory to check for files
+    parent_ome_dir = directory.parent / "ome_tiff"
+    if parent_ome_dir.exists() and parent_ome_dir.is_dir():
+        search_dir = parent_ome_dir
+        logger.info(f"Detected ome_tiff/ directory, using {search_dir} for channel detection")
+    else:
+        search_dir = directory
+    
     channels = detect_channels(directory)
     
     # Prefer fluorescence channels if available
@@ -1783,10 +1813,16 @@ def select_channel_pattern(directory: Union[str, Path]) -> str:
     
     # If no specific patterns found, check for OME-TIFF files first, then regular TIFF
     # Check for OME-TIFF files (.ome.tif or .ome.tiff)
-    ome_tiff_files = [f for f in directory.iterdir() if f.suffix.lower() in ('.tif', '.tiff') and '.ome.' in f.name.lower()]
+    ome_tiff_files = [f for f in search_dir.iterdir() if f.suffix.lower() in ('.tif', '.tiff') and '.ome.' in f.name.lower()]
     if ome_tiff_files:
-        print("Info: Detected OME-TIFF files, using *.ome.tif pattern")
-        return "*.ome.tif"
+        # Check which extension is actually used (.tif vs .tiff)
+        example_file = ome_tiff_files[0].name
+        if example_file.lower().endswith('.ome.tiff'):
+            print("Info: Detected OME-TIFF files, using *.ome.tiff pattern")
+            return "*.ome.tiff"
+        else:
+            print("Info: Detected OME-TIFF files, using *.ome.tif pattern")
+            return "*.ome.tif"
     
     print("Warning: No specific channel pattern detected, using all TIFF files")
     return "*.tiff"
@@ -2009,12 +2045,18 @@ def register_and_update_coordinates(
         region_coords = coords_df[coords_df['region'] == region].copy()
         
         # Get image paths for this region only
-        # Look in the 0 subdirectory for TIFF files
-        tiff_dir = image_directory / "0"
-        if tiff_dir.exists():
-            selected_tiff_paths = list(tiff_dir.glob(channel_pattern))
+        # Check for new OME-TIFF structure first: ome_tiff/ directory
+        ome_tiff_dir = image_directory / "ome_tiff"
+        if ome_tiff_dir.exists() and ome_tiff_dir.is_dir():
+            selected_tiff_paths = list(ome_tiff_dir.glob(channel_pattern))
+            logger.info(f"Reading images from ome_tiff/ directory: {ome_tiff_dir}")
         else:
-            selected_tiff_paths = list(image_directory.glob(channel_pattern))
+            # Look in the 0 subdirectory for TIFF files (legacy structure)
+            tiff_dir = image_directory / "0"
+            if tiff_dir.exists():
+                selected_tiff_paths = list(tiff_dir.glob(channel_pattern))
+            else:
+                selected_tiff_paths = list(image_directory.glob(channel_pattern))
         
         # Filter for the specific region
         region_paths = []
