@@ -380,7 +380,14 @@ class StitchingComputedParameters:
         logging.info(f"pixel_size_um: {self.pixel_size_um}")
 
     def parse_ome_tiff(self) -> None:
-        """Parse OME-TIFF files using the image_loaders module."""
+        """Parse OME-TIFF files using the image_loaders module.
+        
+        Supports two directory structures:
+        1. New structure: acquisition_root/ome_tiff/ contains all OME-TIFF files
+        2. Old structure: acquisition_root/0/ contains OME-TIFF files
+        
+        In both cases, coordinates.csv is read from acquisition_root/0/
+        """
         from .image_loaders import create_image_loader, parse_ome_tiff_filename
         
         input_path = pathlib.Path(self.parent.input_folder)
@@ -389,12 +396,29 @@ class StitchingComputedParameters:
         max_z = 0
         max_fov = 0
         
+        # Check for new ome_tiff/ directory structure
+        ome_tiff_dir = input_path / "ome_tiff"
+        if ome_tiff_dir.exists() and ome_tiff_dir.is_dir():
+            logging.info(f"Detected new OME-TIFF structure: using {ome_tiff_dir}")
+            use_ome_tiff_dir = True
+        else:
+            logging.info("Using legacy OME-TIFF structure: OME files in timepoint directories")
+            use_ome_tiff_dir = False
+        
         # Iterate over each timepoint
         for timepoint in self.timepoints:
-            image_folder = input_path / str(timepoint)
-            coordinates_path = image_folder / "coordinates.csv"
+            timepoint_folder = input_path / str(timepoint)
+            coordinates_path = timepoint_folder / "coordinates.csv"
             
-            logging.info(f"Processing OME-TIFF timepoint {timepoint}, folder: {image_folder}")
+            # Determine where to look for OME-TIFF files
+            if use_ome_tiff_dir:
+                # New structure: all OME files in ome_tiff/ directory
+                image_folder = ome_tiff_dir
+                logging.info(f"Processing OME-TIFF timepoint {timepoint}, reading from: {image_folder}")
+            else:
+                # Old structure: OME files in timepoint directory
+                image_folder = timepoint_folder
+                logging.info(f"Processing OME-TIFF timepoint {timepoint}, folder: {image_folder}")
             
             try:
                 coordinates_df = pd.read_csv(coordinates_path)
@@ -409,7 +433,7 @@ class StitchingComputedParameters:
                 (f.name.lower().endswith('.ome.tif') or f.name.lower().endswith('.ome.tiff'))
             ])
             
-            logging.info(f"Found {len(ome_tiff_files)} OME-TIFF files in timepoint {timepoint}")
+            logging.info(f"Found {len(ome_tiff_files)} OME-TIFF files in {image_folder}")
             
             # Process each OME-TIFF file
             for ome_file in ome_tiff_files:
