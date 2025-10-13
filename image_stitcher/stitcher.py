@@ -623,16 +623,37 @@ class Stitcher:
         self.paths.output_folder.mkdir(exist_ok=True, parents=True)
 
         if self.params.apply_flatfield:
-            # either load an existing manifest…
+            # Check if flatfields were already computed (e.g., by registration)
+            acquisition_folder = pathlib.Path(self.params.input_folder)
+            auto_flatfield_manifest = acquisition_folder / "flatfields" / "flatfield_manifest.json"
+            
+            # Priority: explicit manifest > auto-discovered > compute new
             if self.params.flatfield_manifest:
+                # User explicitly specified a manifest
                 from .flatfield_utils import load_flatfield_correction
-
+                logging.info(f"Loading flatfields from explicit manifest: {self.params.flatfield_manifest}")
                 self.computed_parameters.flatfields = load_flatfield_correction(
                     self.params.flatfield_manifest,
                     self.computed_parameters,
                 )
-            # …or compute afresh
-            else:
+            elif auto_flatfield_manifest.exists():
+                # Flatfields exist from previous computation (e.g., registration)
+                from .flatfield_utils import load_flatfield_correction
+                logging.info(f"Loading existing flatfields from: {auto_flatfield_manifest}")
+                try:
+                    self.computed_parameters.flatfields = load_flatfield_correction(
+                        auto_flatfield_manifest,
+                        self.computed_parameters,
+                    )
+                    logging.info("Successfully loaded existing flatfields")
+                except Exception as e:
+                    logging.warning(f"Failed to load existing flatfields: {e}. Computing new ones.")
+                    # Fall through to compute new flatfields
+                    self.computed_parameters.flatfields = None
+            
+            # Compute flatfields if not loaded
+            if not self.computed_parameters.flatfields:
+                logging.info("Computing new flatfield corrections")
                 self.computed_parameters.flatfields = (
                     flatfield_correction.compute_flatfield_correction(
                         self.computed_parameters,
@@ -643,8 +664,6 @@ class Stitcher:
                 # Save the computed flatfields to the acquisition folder
                 if self.computed_parameters.flatfields:
                     from .flatfield_utils import save_flatfield_correction
-                    
-                    acquisition_folder = pathlib.Path(self.params.input_folder)
                     flatfield_dir = acquisition_folder / "flatfields"
                     
                     try:

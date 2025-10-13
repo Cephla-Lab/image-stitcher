@@ -449,7 +449,9 @@ def register_tiles_batched(
     pou: float = 3,
     ncc_threshold: float = 0.5,
     z_slice_to_keep: Optional[int] = 0,
-    tensor_backend_engine: Optional[str] = None
+    tensor_backend_engine: Optional[str] = None,
+    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None,
+    flatfield_manifest: Optional[Path] = None
 ) -> Tuple[pd.DataFrame, dict]:
     """Register tiles using memory-constrained batched processing.
     
@@ -471,6 +473,10 @@ def register_tiles_batched(
         Z-slice to use for registration
     tensor_backend_engine : Optional[str]
         Preferred tensor backend engine ('cupy', 'torch', 'numpy', None for auto)
+    flatfield_corrections : Optional[Dict[int, np.ndarray]]
+        Precomputed flatfield corrections indexed by channel
+    flatfield_manifest : Optional[Path]
+        Path to flatfield manifest file to load corrections
         
     Returns
     -------
@@ -1511,8 +1517,39 @@ def read_tiff_images_for_region(
 
 
 
-def load_single_image(path: Path) -> Tuple[str, Optional[np.ndarray]]:
-    """Load a single image with error handling.
+def apply_flatfield_to_image(
+    image: np.ndarray, 
+    flatfield: np.ndarray, 
+    dtype: Optional[np.dtype] = None
+) -> np.ndarray:
+    """Apply flatfield correction to a single image.
+    
+    Parameters
+    ----------
+    image : np.ndarray
+        Input image to correct
+    flatfield : np.ndarray
+        Flatfield correction array (same shape as image)
+    dtype : Optional[np.dtype]
+        Output dtype, defaults to input dtype
+        
+    Returns
+    -------
+    np.ndarray
+        Flatfield-corrected image
+    """
+    if dtype is None:
+        dtype = image.dtype
+    
+    corrected = (image / flatfield).clip(
+        min=np.iinfo(dtype).min if np.issubdtype(dtype, np.integer) else 0,
+        max=np.iinfo(dtype).max if np.issubdtype(dtype, np.integer) else 1
+    ).astype(dtype)
+    return corrected
+
+
+def load_single_image(path: Path, flatfield: Optional[np.ndarray] = None) -> Tuple[str, Optional[np.ndarray]]:
+    """Load a single image with error handling and optional flatfield correction.
     
     Handles regular TIFF, multi-page TIFF, and OME-TIFF files.
     For multi-page TIFF files (containing "_stack" in name), extracts the middle z-slice.
@@ -1522,6 +1559,8 @@ def load_single_image(path: Path) -> Tuple[str, Optional[np.ndarray]]:
     ----------
     path : Path
         Path to the TIFF file
+    flatfield : Optional[np.ndarray]
+        Flatfield correction to apply (same shape as image)
         
     Returns
     -------
@@ -1529,6 +1568,8 @@ def load_single_image(path: Path) -> Tuple[str, Optional[np.ndarray]]:
         Tuple of (filename, image_array) or (filename, None) if loading failed
     """
     try:
+        image = None
+        
         # Check if this is an OME-TIFF file
         if path.name.lower().endswith('.ome.tif') or path.name.lower().endswith('.ome.tiff'):
             # Use the image loader for OME-TIFF
@@ -1543,14 +1584,13 @@ def load_single_image(path: Path) -> Tuple[str, Optional[np.ndarray]]:
                 
                 image = loader.read_slice(channel=channel_idx, z=z_idx)
                 logger.debug(f"Loaded OME-TIFF {path.name}: channel {channel_idx}, z-slice {z_idx}/{meta['num_z']}")
-                return path.name, image
             except Exception as e:
                 logger.warning(f"Failed to load OME-TIFF with image_loaders, trying tifffile: {e}")
                 # Fallback to tifffile
                 pass
         
         # Check if this is a multi-page TIFF
-        if "_stack" in path.name:
+        if image is None and "_stack" in path.name:
             # Multi-page TIFF: extract middle z-slice to match stitching behavior
             with tifffile.TiffFile(path) as tif:
                 num_pages = len(tif.pages)
@@ -1559,13 +1599,18 @@ def load_single_image(path: Path) -> Tuple[str, Optional[np.ndarray]]:
                     middle_z = num_pages // 2
                     image = tif.pages[middle_z].asarray()
                     logger.debug(f"Loaded middle z-slice {middle_z} from {path.name} ({num_pages} total slices)")
-                    return path.name, image
                 else:
                     # Single page, load normally
-                    return path.name, tif.pages[0].asarray()
-        else:
+                    image = tif.pages[0].asarray()
+        elif image is None:
             # Regular TIFF file
-            return path.name, tifffile.imread(str(path))
+            image = tifffile.imread(str(path))
+        
+        # Apply flatfield correction if provided
+        if image is not None and flatfield is not None:
+            image = apply_flatfield_to_image(image, flatfield, dtype=image.dtype)
+            
+        return path.name, image
     except MemoryError:
         logger.error(f"MemoryError reading {path}. File might be too large or corrupt.")
         return path.name, None
@@ -1922,7 +1967,9 @@ def register_and_update_coordinates(
     skip_backup: bool = False,
     z_slice_for_registration: Optional[int] = 0,
     edge_width: int = DEFAULT_EDGE_WIDTH,
-    tensor_backend_engine: Optional[str] = None
+    tensor_backend_engine: Optional[str] = None,
+    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None,
+    flatfield_manifest: Optional[Path] = None
 ) -> pd.DataFrame:
     """Register tiles and update stage coordinates for all regions.
     
@@ -1950,6 +1997,10 @@ def register_and_update_coordinates(
         Width of the edge strips (in pixels) to use for registration
     tensor_backend_engine : Optional[str]
         Preferred tensor backend engine ('cupy', 'torch', 'numpy', None for auto)
+    flatfield_corrections : Optional[Dict[int, np.ndarray]]
+        Precomputed flatfield corrections indexed by channel
+    flatfield_manifest : Optional[Path]
+        Path to flatfield manifest file to load corrections
         
     Returns
     -------
@@ -2132,7 +2183,9 @@ def register_and_update_coordinates(
                 pou=pou,
                 ncc_threshold=ncc_threshold,
                 z_slice_to_keep=z_slice_for_registration,
-                tensor_backend_engine=tensor_backend_engine
+                tensor_backend_engine=tensor_backend_engine,
+                flatfield_corrections=flatfield_corrections,
+                flatfield_manifest=flatfield_manifest
             )
             
             # Calculate pixel size
@@ -2188,7 +2241,9 @@ def process_multiple_timepoints(
     pou: float = 3,
     ncc_threshold: float = 0.5,
     edge_width: int = DEFAULT_EDGE_WIDTH,
-    tensor_backend_engine: Optional[str] = None
+    tensor_backend_engine: Optional[str] = None,
+    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None,
+    flatfield_manifest: Optional[Path] = None
 ) -> Dict[int, pd.DataFrame]:
     """Process multiple timepoints from a directory.
     
@@ -2206,6 +2261,10 @@ def process_multiple_timepoints(
         Width of the edge strips (in pixels) to use for registration
     tensor_backend_engine : Optional[str]
         Preferred tensor backend engine ('cupy', 'torch', 'numpy', None for auto)
+    flatfield_corrections : Optional[Dict[int, np.ndarray]]
+        Precomputed flatfield corrections indexed by channel
+    flatfield_manifest : Optional[Path]
+        Path to flatfield manifest file to load corrections
         
     Returns
     -------
@@ -2260,7 +2319,9 @@ def process_multiple_timepoints(
                 skip_backup=True,  # Skip backup since we already made one
                 z_slice_for_registration=0,
                 edge_width=edge_width,
-                tensor_backend_engine=tensor_backend_engine
+                tensor_backend_engine=tensor_backend_engine,
+                flatfield_corrections=flatfield_corrections,
+                flatfield_manifest=flatfield_manifest
             )
             results[timepoint] = updated_coords
             print(f"Successfully processed timepoint {timepoint}")

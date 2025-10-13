@@ -172,12 +172,22 @@ class StitcherThread(QThread):
 
 
 class RegistrationThread(QThread):
-    def __init__(self, image_directory: str, csv_path: str | None, output_csv_path: str | None, tensor_backend_engine: str | None = None) -> None:
+    def __init__(
+        self, 
+        image_directory: str, 
+        csv_path: str | None, 
+        output_csv_path: str | None, 
+        tensor_backend_engine: str | None = None,
+        flatfield_corrections: dict[int, np.ndarray] | None = None,
+        flatfield_manifest: pathlib.Path | None = None
+    ) -> None:
         super().__init__()
         self.image_directory = image_directory
         self.csv_path = csv_path
         self.output_csv_path = output_csv_path
         self.tensor_backend_engine = tensor_backend_engine
+        self.flatfield_corrections = flatfield_corrections
+        self.flatfield_manifest = flatfield_manifest
 
     def run(self) -> None:
         try:
@@ -188,7 +198,9 @@ class RegistrationThread(QThread):
                 pou=3,                      
                 ncc_threshold=0.5,           
                 edge_width=195,
-                tensor_backend_engine=self.tensor_backend_engine
+                tensor_backend_engine=self.tensor_backend_engine,
+                flatfield_corrections=self.flatfield_corrections,
+                flatfield_manifest=self.flatfield_manifest
             )
             
             # Emit success signal with number of processed timepoints
@@ -221,6 +233,8 @@ class StitchingGUI(QWidget):
         self.output_path = ""
         self.dtype: np.dtype | None = None
         self.flatfield_manifest: pathlib.Path | None = None
+        self.computed_flatfields: dict[int, np.ndarray] | None = None  # Store computed flatfields
+        self.flatfield_computed_params: Any | None = None  # Store computed parameters used for flatfield
         self.initUI()
 
     def initUI(self) -> None:
@@ -236,10 +250,10 @@ class StitchingGUI(QWidget):
         self.inputDirDropArea.path_dropped.connect(self.onInputDirectoryDropped)
         self.mainLayout.addWidget(self.inputDirDropArea, 0, 1)
 
-        # Registration section
+        # Start row counter
         row = 1
         
-        # Compute Backend
+        # Compute Backend section
         self.tensorBackendLabel = QLabel("Compute Backend:", self)
         self.mainLayout.addWidget(self.tensorBackendLabel, row, 0)
         self.tensorBackendCombo = QComboBox(self)
@@ -249,7 +263,31 @@ class StitchingGUI(QWidget):
         # Initialize backend options
         self._populate_tensor_backend_options()
         
-        # Registration status indicator
+        # Flatfield Correction section (moved before registration)
+        self.flatfieldModeLabel = QLabel("Flatfield Correction:", self)
+        self.mainLayout.addWidget(self.flatfieldModeLabel, row, 0)
+        self.flatfieldModeCombo = QComboBox(self)
+        self.flatfieldModeCombo.addItems(
+            [
+                "No Flatfield Correction",
+                "Compute Flatfield Correction",
+                "Load Precomputed Flatfield",
+            ]
+        )
+        self.flatfieldModeCombo.currentIndexChanged.connect(self.onFlatfieldModeChanged)
+        self.mainLayout.addWidget(self.flatfieldModeCombo, row, 1)
+        row += 1
+
+        self.flatfieldLoadLabel = QLabel("Load Flatfield:", self)
+        self.mainLayout.addWidget(self.flatfieldLoadLabel, row, 0)
+        self.flatfieldLoadLabel.setVisible(False)
+        self.loadFlatfieldDropArea = DragDropArea("Drag & Drop Flatfield Directory Here", self)
+        self.loadFlatfieldDropArea.path_dropped.connect(self.onLoadFlatfieldDropped)
+        self.mainLayout.addWidget(self.loadFlatfieldDropArea, row, 1)
+        self.loadFlatfieldDropArea.setVisible(False)
+        row += 1
+        
+        # Registration section
         self.registrationStatusLabel = QLabel("Status: Not registered", self)
         self.mainLayout.addWidget(self.registrationStatusLabel, row, 0, 1, 2)
         row += 1
@@ -283,30 +321,6 @@ class StitchingGUI(QWidget):
         self.pyramidCheckbox = QCheckBox(self)
         self.pyramidCheckbox.setChecked(True)
         self.mainLayout.addWidget(self.pyramidCheckbox, row, 1)
-        row += 1
-
-        # Flatfield Correction section
-        self.flatfieldModeLabel = QLabel("Correction Mode:", self)
-        self.mainLayout.addWidget(self.flatfieldModeLabel, row, 0)
-        self.flatfieldModeCombo = QComboBox(self)
-        self.flatfieldModeCombo.addItems(
-            [
-                "No Flatfield Correction",
-                "Compute Flatfield Correction",
-                "Load Precomputed Flatfield",
-            ]
-        )
-        self.flatfieldModeCombo.currentIndexChanged.connect(self.onFlatfieldModeChanged)
-        self.mainLayout.addWidget(self.flatfieldModeCombo, row, 1)
-        row += 1
-
-        self.flatfieldLoadLabel = QLabel("Load Flatfield:", self)
-        self.mainLayout.addWidget(self.flatfieldLoadLabel, row, 0)
-        self.flatfieldLoadLabel.setVisible(False) # Initially hidden
-        self.loadFlatfieldDropArea = DragDropArea("Drag & Drop Flatfield Directory Here", self)
-        self.loadFlatfieldDropArea.path_dropped.connect(self.onLoadFlatfieldDropped)
-        self.mainLayout.addWidget(self.loadFlatfieldDropArea, row, 1)
-        self.loadFlatfieldDropArea.setVisible(False) # Initially hidden
         row += 1
 
         # Z-Stack Options section
@@ -1092,6 +1106,94 @@ class StitchingGUI(QWidget):
             return
 
         try:
+            # Get flatfield mode selection
+            flatfield_mode = get_flatfield_mode_from_string(self.flatfieldModeCombo.currentText())
+            
+            # Handle flatfield computation/loading if needed
+            flatfield_corrections = None
+            flatfield_manifest = None
+            
+            if flatfield_mode == FlatfieldModeOption.COMPUTE:
+                # Compute flatfields before registration
+                self.statusLabel.setText("Status: Computing flatfields...")
+                self.progressBar.setRange(0, 0)
+                self.progressBar.show()
+                QApplication.processEvents()  # Update UI
+                
+                try:
+                    # Create temporary stitching parameters to compute flatfields
+                    temp_params = StitchingParameters(
+                        input_folder=self.inputDirectory,
+                        output_format=OutputFormat.ome_zarr,
+                        scan_pattern=ScanPattern.unidirectional,
+                        apply_flatfield=False  # Don't apply, just compute
+                    )
+                    from .stitcher import Stitcher
+                    temp_stitcher = Stitcher(temp_params)
+                    
+                    # Compute flatfields
+                    from .flatfield_correction import compute_flatfield_correction
+                    flatfield_corrections = compute_flatfield_correction(
+                        temp_stitcher.computed_parameters,
+                        lambda: None  # No progress callback needed
+                    )
+                    
+                    # Save flatfields for later use
+                    if flatfield_corrections:
+                        from .flatfield_utils import save_flatfield_correction
+                        acquisition_folder = pathlib.Path(self.inputDirectory)
+                        flatfield_dir = acquisition_folder / "flatfields"
+                        flatfield_manifest = save_flatfield_correction(
+                            flatfield_corrections,
+                            temp_stitcher.computed_parameters,
+                            flatfield_dir
+                        )
+                        self.computed_flatfields = flatfield_corrections
+                        self.flatfield_computed_params = temp_stitcher.computed_parameters
+                        logging.info(f"Computed flatfields saved to {flatfield_dir}")
+                    
+                except Exception as e:
+                    logging.error(f"Failed to compute flatfields: {e}")
+                    QMessageBox.warning(
+                        self, "Flatfield Warning", 
+                        f"Failed to compute flatfields: {e}\nContinuing registration without flatfield correction."
+                    )
+                    flatfield_corrections = None
+                    
+            elif flatfield_mode == FlatfieldModeOption.LOAD:
+                # Load precomputed flatfields
+                if self.flatfield_manifest:
+                    flatfield_manifest = self.flatfield_manifest
+                    try:
+                        from .flatfield_utils import load_flatfield_correction
+                        temp_params = StitchingParameters(
+                            input_folder=self.inputDirectory,
+                            output_format=OutputFormat.ome_zarr,
+                            scan_pattern=ScanPattern.unidirectional
+                        )
+                        from .stitcher import Stitcher
+                        temp_stitcher = Stitcher(temp_params)
+                        
+                        flatfield_corrections = load_flatfield_correction(
+                            self.flatfield_manifest,
+                            temp_stitcher.computed_parameters
+                        )
+                        self.computed_flatfields = flatfield_corrections
+                        logging.info("Loaded flatfield corrections for registration")
+                    except Exception as e:
+                        logging.error(f"Failed to load flatfields: {e}")
+                        QMessageBox.warning(
+                            self, "Flatfield Warning",
+                            f"Failed to load flatfields: {e}\nContinuing registration without flatfield correction."
+                        )
+                        flatfield_corrections = None
+                        flatfield_manifest = None
+                else:
+                    QMessageBox.warning(
+                        self, "Flatfield Warning",
+                        "No flatfield directory selected.\nContinuing registration without flatfield correction."
+                    )
+            
             # Get selected backend
             tensor_backend_engine = self._get_selected_tensor_backend()
             
@@ -1100,7 +1202,9 @@ class StitchingGUI(QWidget):
                 image_directory=self.inputDirectory,
                 csv_path=None,  # Not needed as process_multiple_timepoints handles this
                 output_csv_path=None,  # Not needed as process_multiple_timepoints handles this
-                tensor_backend_engine=tensor_backend_engine
+                tensor_backend_engine=tensor_backend_engine,
+                flatfield_corrections=flatfield_corrections,
+                flatfield_manifest=flatfield_manifest
             )
             self.registration_thread.error.connect(self.onRegistrationError)
             self.registration_thread.finished.connect(self.onRegistrationFinished)
