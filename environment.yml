@@ -17,7 +17,7 @@ dependencies:
   - pydantic-settings>=2.7.1
   - napari-ome-zarr
   - napari[all]
-  - pyqt5
+  - pyqt
   # Core dependencies for image processing
   - tifffile
   - tqdm
