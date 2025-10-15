@@ -297,6 +297,9 @@ def compute_maximum_spanning_tree(grid: pd.DataFrame) -> nx.Graph:
                 # Validate and compute weight
                 try:
                     weight = _compute_edge_weight(g, ncc_col, direction)
+                    if weight is None:
+                        logger.debug(f"Skipping {direction} connection for tile {i}: NaN NCC value")
+                        continue
                 except ValueError as e:
                     logger.warning(f"Skipping {direction} connection for tile {i}: {e}")
                     continue
@@ -336,6 +339,33 @@ def compute_maximum_spanning_tree(grid: pd.DataFrame) -> nx.Graph:
     if not connection_graph.edges:
         raise ValueError("No valid connections between tiles")
     
+    # Check minimum edge count for viable tree
+    num_nodes = len(connection_graph.nodes)
+    num_edges = len(connection_graph.edges)
+    min_edges_required = num_nodes - 1
+    
+    if num_edges < min_edges_required:
+        raise ValueError(
+            f"Insufficient edges for spanning tree: {num_edges} edges for {num_nodes} nodes. "
+            f"Minimum required: {min_edges_required}. Check NCC threshold or image quality."
+        )
+    
+    # Check if graph has multiple disconnected components
+    num_components = nx.number_connected_components(connection_graph)
+    if num_components > 1:
+        # Get component sizes for informative error message
+        components = list(nx.connected_components(connection_graph))
+        component_sizes = [len(c) for c in components]
+        logger.error(
+            f"Graph has {num_components} disconnected components with sizes: {component_sizes}. "
+            f"Cannot form single spanning tree."
+        )
+        raise ValueError(
+            f"Tile graph has {num_components} disconnected components (sizes: {component_sizes}). "
+            f"Check NCC threshold, image quality, or tile overlap. "
+            f"Tiles may be too far apart or have insufficient overlap for registration."
+        )
+    
     # Validate all edge weights before MST computation
     _validate_graph_weights(connection_graph)
         
@@ -343,6 +373,12 @@ def compute_maximum_spanning_tree(grid: pd.DataFrame) -> nx.Graph:
     try:
         tree = nx.maximum_spanning_tree(connection_graph)
         logger.info(f"Created spanning tree with {len(tree.edges)} edges from {len(connection_graph.edges)} total edges")
+        
+        # Check if tree is connected
+        if not nx.is_connected(tree):
+            num_components = nx.number_connected_components(tree)
+            logger.warning(f"Tree has {num_components} disconnected components")
+        
         return tree
     except Exception as e:
         raise RuntimeError(f"Failed to compute maximum spanning tree: {e}")
@@ -389,7 +425,7 @@ def _resolve_column_names(grid: pd.DataFrame, direction: str) -> Tuple[str, str,
     )
 
 
-def _compute_edge_weight(row: pd.Series, ncc_col: str, direction: str) -> float:
+def _compute_edge_weight(row: pd.Series, ncc_col: str, direction: str) -> Optional[float]:
     """Compute edge weight with proper validation and NaN handling.
     
     Args:
@@ -398,7 +434,7 @@ def _compute_edge_weight(row: pd.Series, ncc_col: str, direction: str) -> float:
         direction: Direction ('left' or 'top')
         
     Returns:
-        Computed weight value
+        Computed weight value, or None if NaN NCC
         
     Raises:
         ValueError: If weight computation fails
@@ -409,9 +445,9 @@ def _compute_edge_weight(row: pd.Series, ncc_col: str, direction: str) -> float:
     except KeyError:
         raise ValueError(f"Column {ncc_col} not found in data")
     
-    # Handle NaN NCC values
+    # Handle NaN NCC values - return None to signal skip
     if pd.isna(base_weight):
-        raise ValueError(f"NaN NCC value in column {ncc_col}")
+        return None
     
     # Validate NCC range
     if not isinstance(base_weight, (int, float, np.number)):
@@ -540,6 +576,16 @@ def compute_final_position(
     # Initialize position columns
     grid['y_pos'] = np.nan
     grid['x_pos'] = np.nan
+    
+    # Track which tiles are in the tree
+    tiles_in_tree = set(tree.nodes())
+    tiles_not_in_tree = set(grid.index) - tiles_in_tree
+    
+    if tiles_not_in_tree:
+        logger.warning(
+            f"Found {len(tiles_not_in_tree)} tiles not in spanning tree (featureless/isolated). "
+            f"These will keep their original stage positions."
+        )
 
     # Find connected components
     components = list(nx.connected_components(tree))
@@ -601,7 +647,21 @@ def compute_final_position(
                             grid.loc[neighbor, "y_pos"] = current_pos[0] - y_trans
                             grid.loc[neighbor, "x_pos"] = current_pos[1] - x_trans
 
-        # Validate and normalize positions
+        # For tiles not in tree, use original stage positions if available
+        if tiles_not_in_tree:
+            if 'stage_x' in grid.columns and 'stage_y' in grid.columns:
+                for tile_idx in tiles_not_in_tree:
+                    # Convert stage coordinates (mm) to pixels if needed
+                    # For now, set to a safe position at the edge
+                    grid.loc[tile_idx, "x_pos"] = 0
+                    grid.loc[tile_idx, "y_pos"] = 0
+                logger.info(f"Set {len(tiles_not_in_tree)} isolated tiles to origin position")
+            else:
+                raise RuntimeError(
+                    f"Cannot position {len(tiles_not_in_tree)} isolated tiles: no stage coordinates available"
+                )
+        
+        # Validate that all positions are now set
         if grid[["y_pos", "x_pos"]].isna().any().any():
             raise RuntimeError("Failed to compute positions for all tiles")
             

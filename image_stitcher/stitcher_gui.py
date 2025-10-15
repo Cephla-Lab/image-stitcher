@@ -199,8 +199,7 @@ class RegistrationThread(QThread):
                 ncc_threshold=0.5,           
                 edge_width=195,
                 tensor_backend_engine=self.tensor_backend_engine,
-                flatfield_corrections=self.flatfield_corrections,
-                flatfield_manifest=self.flatfield_manifest
+                flatfield_corrections=self.flatfield_corrections
             )
             
             # Emit success signal with number of processed timepoints

@@ -260,7 +260,8 @@ def group_neighborhoods_into_batches(
 def load_batch_for_neighborhoods(
     neighborhood_batch: List[Neighborhood],
     selected_tiff_paths: List[Path],
-    all_filenames: List[str]
+    all_filenames: List[str],
+    flatfield: Optional[np.ndarray] = None
 ) -> Tuple[Dict[str, np.ndarray], List[int]]:
     """Load all unique images needed for a batch of neighborhoods."""
     
@@ -273,7 +274,7 @@ def load_batch_for_neighborhoods(
     
     # Load all needed images
     needed_paths = [selected_tiff_paths[i] for i in needed_indices_list]
-    batch_images = load_batch_images(needed_paths)
+    batch_images = load_batch_images(needed_paths, flatfield=flatfield)
     
     return batch_images, needed_indices_list
 
@@ -428,18 +429,32 @@ def batch_paths(paths: List[Path], batch_size: int) -> Iterator[List[Path]]:
     for i in range(0, len(paths), batch_size):
         yield paths[i:i + batch_size]
 
-def load_batch_images(batch_paths: List[Path]) -> Dict[str, np.ndarray]:
-    """Load a batch of images using multiprocessing."""
+def _load_image_wrapper(path: Path) -> Tuple[str, Optional[np.ndarray]]:
+    """Wrapper for multiprocessing - no flatfield during parallel load."""
+    return load_single_image(path, flatfield=None)
+
+def load_batch_images(
+    batch_paths: List[Path], 
+    flatfield: Optional[np.ndarray] = None
+) -> Dict[str, np.ndarray]:
+    """Load a batch of images using multiprocessing, apply flatfield serially."""
     n_processes = min(cpu_count(), len(batch_paths))
     
     with Pool(processes=n_processes) as pool:
         results = list(tqdm(
-            pool.imap(load_single_image, batch_paths),
+            pool.imap(_load_image_wrapper, batch_paths),
             total=len(batch_paths),
             desc="Loading batch"
         ))
     
-    return {k: v for k, v in results if v is not None}
+    images = {k: v for k, v in results if v is not None}
+    
+    # Apply flatfield correction serially if provided
+    if flatfield is not None:
+        for filename, image in images.items():
+            images[filename] = apply_flatfield_to_image(image, flatfield, dtype=image.dtype)
+    
+    return images
 
 def register_tiles_batched(
     selected_tiff_paths: List[Path],
@@ -451,7 +466,7 @@ def register_tiles_batched(
     z_slice_to_keep: Optional[int] = 0,
     tensor_backend_engine: Optional[str] = None,
     flatfield_corrections: Optional[Dict[int, np.ndarray]] = None,
-    flatfield_manifest: Optional[Path] = None
+    registration_channel: int = 0
 ) -> Tuple[pd.DataFrame, dict]:
     """Register tiles using memory-constrained batched processing.
     
@@ -524,7 +539,7 @@ def register_tiles_batched(
                     fov_num = m.group('fov')
                 else:
                     fov_num = m.group(1)
-            except:
+            except Exception:
                 pass
         
         # Get stage coordinates
@@ -628,9 +643,56 @@ def register_tiles_batched(
     # Create neighborhoods and group into memory-constrained batches
     neighborhoods = create_neighborhoods(master_grid)
     
-    # Calculate memory constraints
+    if not neighborhoods:
+        raise ValueError(
+            f"No valid neighborhoods found. Grid has {len(master_grid)} tiles but no valid "
+            f"neighbor relationships. Check that tiles have proper row/col assignments."
+        )
+    
+    # Load first image once for both memory estimation and flatfield validation
     first_image = tifffile.imread(str(selected_tiff_paths[0]))
+    
+    # Get flatfield for registration (use specified channel)
+    flatfield_for_registration = None
+    if flatfield_corrections:
+        # Try specified registration channel first
+        flatfield_for_registration = flatfield_corrections.get(registration_channel, None)
+        
+        if flatfield_for_registration is None:
+            available_channels = list(flatfield_corrections.keys())
+            
+            # If non-default channel explicitly requested but not found, raise error
+            if registration_channel != 0 and available_channels:
+                raise ValueError(
+                    f"Registration channel {registration_channel} not found in flatfield_corrections. "
+                    f"Available channels: {available_channels}. "
+                    f"Please specify a valid registration_channel parameter."
+                )
+            
+            # For default channel (0), fall back to first available
+            if available_channels:
+                fallback_channel = available_channels[0]
+                flatfield_for_registration = flatfield_corrections[fallback_channel]
+                logging.warning(
+                    f"Default registration channel {registration_channel} not found. "
+                    f"Using channel {fallback_channel} instead. Available channels: {available_channels}"
+                )
+        
+        # Validate flatfield shape matches image dimensions before processing
+        if flatfield_for_registration is not None:
+            if flatfield_for_registration.shape != first_image.shape:
+                raise ValueError(
+                    f"Flatfield shape {flatfield_for_registration.shape} does not match "
+                    f"image shape {first_image.shape}. Cannot apply flatfield correction."
+                )
+            logging.info(
+                f"Using flatfield correction for registration from channel {registration_channel} "
+                f"(shape: {flatfield_for_registration.shape})"
+            )
+    
+    # Calculate memory constraints using the already-loaded first_image
     max_memory = calculate_safe_batch_size(selected_tiff_paths[0]) * first_image.nbytes * 8
+    
     del first_image
     gc.collect()
     
@@ -643,7 +705,10 @@ def register_tiles_batched(
         print(f"Processing neighborhood batch {batch_idx + 1}/{len(neighborhood_batches)} with {len(neighborhood_batch)} neighborhoods")
         
         # Load all images needed for this batch
-        batch_images, needed_indices = load_batch_for_neighborhoods(neighborhood_batch, selected_tiff_paths, all_filenames)
+        batch_images, needed_indices = load_batch_for_neighborhoods(
+            neighborhood_batch, selected_tiff_paths, all_filenames,
+            flatfield=flatfield_for_registration
+        )
         
         print(f"DEBUG: Loaded {len(batch_images)} unique images for {len(needed_indices)} indices")
         
@@ -1503,7 +1568,7 @@ def read_tiff_images_for_region(
     # Load images in parallel
     with Pool(processes=n_processes) as pool:
         results = list(tqdm(
-            pool.imap(load_single_image, selected_tiff_paths),
+            pool.imap(_load_image_wrapper, selected_tiff_paths),
             total=len(selected_tiff_paths),
             desc=f"Loading images for region {region}"
         ))
@@ -1537,9 +1602,20 @@ def apply_flatfield_to_image(
     -------
     np.ndarray
         Flatfield-corrected image
+        
+    Raises
+    ------
+    ValueError
+        If flatfield shape doesn't match image shape
     """
     if dtype is None:
         dtype = image.dtype
+    
+    # Validate shapes match
+    if image.shape != flatfield.shape:
+        raise ValueError(
+            f"Flatfield shape {flatfield.shape} doesn't match image shape {image.shape}"
+        )
     
     corrected = (image / flatfield).clip(
         min=np.iinfo(dtype).min if np.issubdtype(dtype, np.integer) else 0,
@@ -1585,9 +1661,20 @@ def load_single_image(path: Path, flatfield: Optional[np.ndarray] = None) -> Tup
                 image = loader.read_slice(channel=channel_idx, z=z_idx)
                 logger.debug(f"Loaded OME-TIFF {path.name}: channel {channel_idx}, z-slice {z_idx}/{meta['num_z']}")
             except Exception as e:
-                logger.warning(f"Failed to load OME-TIFF with image_loaders, trying tifffile: {e}")
-                # Fallback to tifffile
-                pass
+                logger.warning(f"Failed to load OME-TIFF with image_loaders, trying tifffile fallback: {e}")
+                # Fallback to tifffile with explicit middle z-slice selection
+                try:
+                    with tifffile.TiffFile(path) as tif:
+                        num_pages = len(tif.pages)
+                        if num_pages > 1:
+                            middle_z = num_pages // 2
+                            image = tif.pages[middle_z].asarray()
+                            logger.info(f"OME-TIFF fallback: loaded z-slice {middle_z}/{num_pages} from {path.name}")
+                        else:
+                            image = tif.pages[0].asarray()
+                except Exception as fallback_error:
+                    logger.error(f"OME-TIFF fallback also failed for {path.name}: {fallback_error}")
+                    image = None
         
         # Check if this is a multi-page TIFF
         if image is None and "_stack" in path.name:
@@ -1968,8 +2055,7 @@ def register_and_update_coordinates(
     z_slice_for_registration: Optional[int] = 0,
     edge_width: int = DEFAULT_EDGE_WIDTH,
     tensor_backend_engine: Optional[str] = None,
-    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None,
-    flatfield_manifest: Optional[Path] = None
+    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None
 ) -> pd.DataFrame:
     """Register tiles and update stage coordinates for all regions.
     
@@ -2075,12 +2161,18 @@ def register_and_update_coordinates(
     
     # Auto-detect channel pattern if not provided
     if channel_pattern is None:
-        # Look in the 0 subdirectory for TIFF files
-        tiff_dir = image_directory / "0"
-        if tiff_dir.exists():
-            channel_pattern = select_channel_pattern(tiff_dir)
-        else:
-            channel_pattern = select_channel_pattern(image_directory)
+        try:
+            # Look in the 0 subdirectory for TIFF files
+            tiff_dir = image_directory / "0"
+            if tiff_dir.exists():
+                channel_pattern = select_channel_pattern(tiff_dir)
+            else:
+                channel_pattern = select_channel_pattern(image_directory)
+        except Exception as e:
+            logging.error(f"Failed to auto-detect channel pattern: {e}")
+            # Fallback to generic TIFF pattern
+            channel_pattern = "*.tiff"
+            logging.warning(f"Using fallback channel pattern: {channel_pattern}")
     
     # Initialize the updated coordinates with a copy
     updated_coords = coords_df.copy()
@@ -2088,6 +2180,10 @@ def register_and_update_coordinates(
     # Group by region
     regions = coords_df['region'].unique()
     print(f"Found {len(regions)} regions to process: {regions}")
+    
+    # Track failed regions
+    failed_regions = []
+    successful_regions = []
     
     for region in regions:
         print(f"\nProcessing region: {region}")
@@ -2185,7 +2281,7 @@ def register_and_update_coordinates(
                 z_slice_to_keep=z_slice_for_registration,
                 tensor_backend_engine=tensor_backend_engine,
                 flatfield_corrections=flatfield_corrections,
-                flatfield_manifest=flatfield_manifest
+                registration_channel=0
             )
             
             # Calculate pixel size
@@ -2210,15 +2306,17 @@ def register_and_update_coordinates(
             
             # Update the main dataframe with region results
             updated_coords.update(region_updated)
+            successful_regions.append(region)
             
         except Exception as e:
-            print(f"Error processing region {region}: {e}")
-        # Clean up memory after error
-        try:
-            backend = get_tensor_backend()
-            backend.cleanup_memory()
-        except:
-            pass
+            logging.error(f"Error processing region {region}: {e}")
+            failed_regions.append((region, str(e)))
+            # Clean up memory after error
+            try:
+                backend = get_tensor_backend()
+                backend.cleanup_memory()
+            except Exception:
+                pass
             continue
         
         # Force memory cleanup between regions
@@ -2227,6 +2325,25 @@ def register_and_update_coordinates(
             backend.cleanup_memory()
         except:
             pass
+    
+    # Report registration summary
+    print(f"\n=== Registration Summary ===")
+    print(f"Total regions: {len(regions)}")
+    print(f"Successful: {len(successful_regions)}")
+    print(f"Failed: {len(failed_regions)}")
+    
+    if failed_regions:
+        print(f"\nFailed regions:")
+        for region, error in failed_regions:
+            print(f"  - {region}: {error}")
+        
+        # Warn if too many failures
+        failure_rate = len(failed_regions) / len(regions)
+        if failure_rate > 0.5:
+            logging.warning(
+                f"High failure rate: {failure_rate:.1%} of regions failed. "
+                f"Check NCC threshold, image quality, or tile overlap."
+            )
     
     # Save updated coordinates to the output path
     updated_coords.to_csv(output_csv_path, index=False)
@@ -2242,8 +2359,7 @@ def process_multiple_timepoints(
     ncc_threshold: float = 0.5,
     edge_width: int = DEFAULT_EDGE_WIDTH,
     tensor_backend_engine: Optional[str] = None,
-    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None,
-    flatfield_manifest: Optional[Path] = None
+    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None
 ) -> Dict[int, pd.DataFrame]:
     """Process multiple timepoints from a directory.
     
@@ -2320,8 +2436,7 @@ def process_multiple_timepoints(
                 z_slice_for_registration=0,
                 edge_width=edge_width,
                 tensor_backend_engine=tensor_backend_engine,
-                flatfield_corrections=flatfield_corrections,
-                flatfield_manifest=flatfield_manifest
+                flatfield_corrections=flatfield_corrections
             )
             results[timepoint] = updated_coords
             print(f"Successfully processed timepoint {timepoint}")
