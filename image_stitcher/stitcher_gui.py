@@ -225,7 +225,6 @@ class StitchingGUI(QWidget):
         self.stitcher: StitcherThread | None = (
             None  # Stitcher is initialized when needed
         )
-        self.registration_thread: RegistrationThread | None = None
         self.inputDirectory: str | None = (
             None  # This will be set by the directory selection
         )
@@ -286,16 +285,12 @@ class StitchingGUI(QWidget):
         self.loadFlatfieldDropArea.setVisible(False)
         row += 1
         
-        # Registration section
-        self.registrationStatusLabel = QLabel("Status: Not registered", self)
-        self.mainLayout.addWidget(self.registrationStatusLabel, row, 0, 1, 2)
-        row += 1
-        
-        # Registration button
-        self.registerBtn = QPushButton("Run Registration", self)
-        self.registerBtn.clicked.connect(self.onRegistrationStart)
-        self.registerBtn.setEnabled(False)  # Disabled until input directory is selected
-        self.mainLayout.addWidget(self.registerBtn, row, 0, 1, 2)
+        # Registration checkbox - when checked, registration runs before stitching
+        self.runRegistrationLabel = QLabel("Run Registration:", self)
+        self.mainLayout.addWidget(self.runRegistrationLabel, row, 0)
+        self.runRegistrationCheckbox = QCheckBox(self)
+        self.runRegistrationCheckbox.setChecked(False)  # Default: unchecked
+        self.mainLayout.addWidget(self.runRegistrationCheckbox, row, 1)
         row += 1
 
         # Output format section
@@ -390,12 +385,8 @@ class StitchingGUI(QWidget):
 
         self.inputDirectory = str(acquisition_dir)
         
-        # Enable registration and stitching buttons
-        self.registerBtn.setEnabled(True)
+        # Enable stitching button
         self.startBtn.setEnabled(True)
-        
-        # Reset registration status
-        self.registrationStatusLabel.setText("Status: Not registered")
         
         # Detect and display the acquisition format
         try:
@@ -530,12 +521,20 @@ class StitchingGUI(QWidget):
                 apply_mip=(z_layer_mode == 3),  # Set apply_mip based on the combo box index
             )
 
-            # Create and configure the stitcher thread (no registration - that's separate)
+            # Create and configure the stitcher thread
+            # Check if registration should be run first based on checkbox state
+            perform_registration = self.runRegistrationCheckbox.isChecked()
+            
+            # Get selected backend if registration is requested
+            tensor_backend_engine = None
+            if perform_registration:
+                tensor_backend_engine = self._get_selected_tensor_backend()
+            
             self.stitcher = StitcherThread(
                 params=params,
-                perform_registration=False,  # Registration is now a separate button
+                perform_registration=perform_registration,
                 image_directory=self.inputDirectory,
-                tensor_backend_engine=None  # Not needed for stitching
+                tensor_backend_engine=tensor_backend_engine
             )
 
             # Set up callbacks
@@ -571,6 +570,14 @@ class StitchingGUI(QWidget):
         """Handle completion of stitching."""
         self.statusLabel.setText("Status: Stitching completed")
         self.progressBar.hide()
+        
+        # Update registration status if it was performed
+        if self.stitcher and self.stitcher.perform_registration:
+            if self.stitcher.registration_complete:
+                self.statusLabel.setText("Status: Registration complete")
+            elif self.stitcher.registration_error:
+                self.statusLabel.setText(f"Status: Registration failed - {self.stitcher.registration_error}")
+        
         logging.info("Image stitching has been completed successfully.")
 
     def onFlatfieldModeChanged(self, idx: int) -> None:
@@ -1096,150 +1103,6 @@ class StitchingGUI(QWidget):
         )  # Normalize the Blue component
         return Colormap(colors=[c0, c1], controls=[0, 1], name=channel_info["name"])
 
-    def onRegistrationStart(self) -> None:
-        """Start registration from GUI."""
-        if not self.inputDirectory:
-            QMessageBox.warning(
-                self, "Input Error", "Please select an input directory."
-            )
-            return
-
-        try:
-            # Get flatfield mode selection
-            flatfield_mode = get_flatfield_mode_from_string(self.flatfieldModeCombo.currentText())
-            
-            # Handle flatfield computation/loading if needed
-            flatfield_corrections = None
-            flatfield_manifest = None
-            
-            if flatfield_mode == FlatfieldModeOption.COMPUTE:
-                # Compute flatfields before registration
-                self.statusLabel.setText("Status: Computing flatfields...")
-                self.progressBar.setRange(0, 0)
-                self.progressBar.show()
-                QApplication.processEvents()  # Update UI
-                
-                try:
-                    # Create temporary stitching parameters to compute flatfields
-                    temp_params = StitchingParameters(
-                        input_folder=self.inputDirectory,
-                        output_format=OutputFormat.ome_zarr,
-                        scan_pattern=ScanPattern.unidirectional,
-                        apply_flatfield=False  # Don't apply, just compute
-                    )
-                    from .stitcher import Stitcher
-                    temp_stitcher = Stitcher(temp_params)
-                    
-                    # Compute flatfields
-                    from .flatfield_correction import compute_flatfield_correction
-                    flatfield_corrections = compute_flatfield_correction(
-                        temp_stitcher.computed_parameters,
-                        lambda: None  # No progress callback needed
-                    )
-                    
-                    # Save flatfields for later use
-                    if flatfield_corrections:
-                        from .flatfield_utils import save_flatfield_correction
-                        acquisition_folder = pathlib.Path(self.inputDirectory)
-                        flatfield_dir = acquisition_folder / "flatfields"
-                        flatfield_manifest = save_flatfield_correction(
-                            flatfield_corrections,
-                            temp_stitcher.computed_parameters,
-                            flatfield_dir
-                        )
-                        self.computed_flatfields = flatfield_corrections
-                        self.flatfield_computed_params = temp_stitcher.computed_parameters
-                        logging.info(f"Computed flatfields saved to {flatfield_dir}")
-                    
-                except Exception as e:
-                    logging.error(f"Failed to compute flatfields: {e}")
-                    QMessageBox.warning(
-                        self, "Flatfield Warning", 
-                        f"Failed to compute flatfields: {e}\nContinuing registration without flatfield correction."
-                    )
-                    flatfield_corrections = None
-                    
-            elif flatfield_mode == FlatfieldModeOption.LOAD:
-                # Load precomputed flatfields
-                if self.flatfield_manifest:
-                    flatfield_manifest = self.flatfield_manifest
-                    try:
-                        from .flatfield_utils import load_flatfield_correction
-                        temp_params = StitchingParameters(
-                            input_folder=self.inputDirectory,
-                            output_format=OutputFormat.ome_zarr,
-                            scan_pattern=ScanPattern.unidirectional
-                        )
-                        from .stitcher import Stitcher
-                        temp_stitcher = Stitcher(temp_params)
-                        
-                        flatfield_corrections = load_flatfield_correction(
-                            self.flatfield_manifest,
-                            temp_stitcher.computed_parameters
-                        )
-                        self.computed_flatfields = flatfield_corrections
-                        logging.info("Loaded flatfield corrections for registration")
-                    except Exception as e:
-                        logging.error(f"Failed to load flatfields: {e}")
-                        QMessageBox.warning(
-                            self, "Flatfield Warning",
-                            f"Failed to load flatfields: {e}\nContinuing registration without flatfield correction."
-                        )
-                        flatfield_corrections = None
-                        flatfield_manifest = None
-                else:
-                    QMessageBox.warning(
-                        self, "Flatfield Warning",
-                        "No flatfield directory selected.\nContinuing registration without flatfield correction."
-                    )
-            
-            # Get selected backend
-            tensor_backend_engine = self._get_selected_tensor_backend()
-            
-            # Start registration in a separate thread
-            self.registration_thread = RegistrationThread(
-                image_directory=self.inputDirectory,
-                csv_path=None,  # Not needed as process_multiple_timepoints handles this
-                output_csv_path=None,  # Not needed as process_multiple_timepoints handles this
-                tensor_backend_engine=tensor_backend_engine,
-                flatfield_corrections=flatfield_corrections,
-                flatfield_manifest=flatfield_manifest
-            )
-            self.registration_thread.error.connect(self.onRegistrationError)
-            self.registration_thread.finished.connect(self.onRegistrationFinished)
-
-            # Update UI
-            self.statusLabel.setText("Status: Registering images...")
-            self.registrationStatusLabel.setText("Status: Registering...")
-            self.progressBar.setRange(0, 0)  # Indeterminate progress
-            self.progressBar.show()
-            
-            # Disable register button while processing
-            self.registerBtn.setEnabled(False)
-
-            # Start registration
-            self.registration_thread.start()
-
-        except Exception as e:
-            QMessageBox.critical(self, "Registration Error", str(e))
-            self.statusLabel.setText("Status: Error Encountered")
-            self.registrationStatusLabel.setText("Status: Registration failed")
-
-    def onRegistrationError(self, error_msg: str) -> None:
-        """Handle registration errors."""
-        QMessageBox.critical(self, "Registration Error", error_msg)
-        self.statusLabel.setText("Status: Error Encountered")
-        self.registrationStatusLabel.setText("Status: Registration failed")
-        self.progressBar.hide()
-        self.registerBtn.setEnabled(True)  # Re-enable for retry
-
-    def onRegistrationFinished(self) -> None:
-        """Handle completion of registration."""
-        self.statusLabel.setText("Status: Registration completed")
-        self.registrationStatusLabel.setText("Status: Registration complete")
-        self.progressBar.hide()
-        self.registerBtn.setEnabled(True)  # Re-enable for re-registration if needed
-        logging.info("Image registration has been completed successfully.")
 
     def onSetFixedRegistration(self) -> None:
         """Handle Set Fixed Registration button click."""
