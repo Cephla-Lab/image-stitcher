@@ -17,6 +17,12 @@ Installs conda (if needed), creates `image-stitcher` environment, and installs d
 Adds CuPy for optimal NVIDIA GPU performance (compatible with Driver 535.x).
 
 ### Windows 11
+
+**Note:** If you haven't enabled script execution in PowerShell, you may need to run this first:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+Then run the setup:
 ```powershell
 .\setup_windows_11.ps1
 ```
