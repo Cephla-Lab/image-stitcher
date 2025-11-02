@@ -351,12 +351,28 @@ class StitchingGUI(QWidget):
         self.startBtn = QPushButton("Start Stitching", self)
         self.startBtn.clicked.connect(self.onStitchingStart)
         self.startBtn.setEnabled(False)  # Disabled until input directory is selected
-        self.mainLayout.addWidget(self.startBtn, row, 0)
+        self.mainLayout.addWidget(self.startBtn, row, 0, 1, 2)  # Span both columns
+        row += 1
+
+        # Output file path section - create horizontal layout for path + button
+        outputPathLayout = QHBoxLayout()
+        self.outputPathEdit = QLineEdit(self)
+        self.outputPathEdit.setPlaceholderText("Path to stitched output file...")
+        self.outputPathEdit.setReadOnly(False)  # Allow manual editing
+        outputPathLayout.addWidget(self.outputPathEdit)
+        
+        self.browseOutputBtn = QPushButton("Browse Files", self)
+        self.browseOutputBtn.clicked.connect(self.onBrowseOutputFile)
+        self.browseOutputBtn.setMaximumWidth(120)  # Make button smaller
+        outputPathLayout.addWidget(self.browseOutputBtn)
+        
+        self.mainLayout.addLayout(outputPathLayout, row, 0, 1, 2)  # Span both columns
+        row += 1
 
         self.viewBtn = QPushButton("View Output", self)
         self.viewBtn.clicked.connect(self.onViewOutput)
         self.viewBtn.setEnabled(False)
-        self.mainLayout.addWidget(self.viewBtn, row, 1)
+        self.mainLayout.addWidget(self.viewBtn, row, 0, 1, 2)  # Span both columns
         row += 1
         
         # Add stretch to push everything to the top
@@ -797,6 +813,7 @@ class StitchingGUI(QWidget):
         self.viewBtn.setEnabled(True)
         self.statusLabel.setText("Saving Completed. Ready to View.")
         self.output_path = path
+        self.outputPathEdit.setText(path)  # Update the output path field
         self.dtype = np.dtype(dtype)
         if dtype == np.uint16:
             c = [0, 65535]
@@ -811,6 +828,34 @@ class StitchingGUI(QWidget):
         QMessageBox.critical(self, "Error", f"Error while processing: {error}")
         self.statusLabel.setText("Error Occurred!")
 
+    def onBrowseOutputFile(self) -> None:
+        """Handle the 'Browse Files' button click to select a stitched output file."""
+        # Allow selecting both directories (for .ome.zarr) and files (for .ome.tiff)
+        options = QFileDialog.Options()
+        
+        # Start with directory selection dialog for .ome.zarr files
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select Stitched Output Directory (.ome.zarr)",
+            self.inputDirectory if self.inputDirectory else "",
+            options=options
+        )
+        
+        if selected_dir:
+            # Validate that this is a stitched output
+            selected_path = pathlib.Path(selected_dir)
+            if selected_path.name.endswith('.ome.zarr') or selected_path.name.endswith('_stitched'):
+                self.outputPathEdit.setText(selected_dir)
+                self.output_path = selected_dir
+                self.viewBtn.setEnabled(True)
+            else:
+                QMessageBox.warning(
+                    self, 
+                    "Invalid Selection", 
+                    "Please select a valid stitched output directory (.ome.zarr)"
+                )
+        # Note: Could also add support for .ome.tiff file selection if needed
+
     def onViewOutput(self) -> None:
         """Handle the 'View Output' button click.
         
@@ -821,11 +866,17 @@ class StitchingGUI(QWidget):
         # Configure logging to see debug output
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         
-        output_path = self.output_path
+        # Get path from the text field (allows user to browse or manually edit)
+        output_path = self.outputPathEdit.text().strip()
         logging.info(f"onViewOutput called with output_path: {output_path}")
         
         if not output_path:
-            QMessageBox.warning(self, "View Error", "No output path set. Has stitching completed?")
+            QMessageBox.warning(self, "View Error", "No output path set. Please browse to select a file or complete stitching first.")
+            return
+        
+        # Validate path exists
+        if not pathlib.Path(output_path).exists():
+            QMessageBox.warning(self, "View Error", f"The specified path does not exist:\n{output_path}")
             return
         
         # Check if this is a wellplate dataset using the same logic as HCS viewer
