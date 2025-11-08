@@ -678,6 +678,8 @@ class Stitcher:
             acquisition_folder = pathlib.Path(self.params.input_folder)
             auto_flatfield_manifest = acquisition_folder / "flatfields" / "flatfield_manifest.json"
             
+            logging.info(f"Flatfield loading: params.flatfield_manifest={self.params.flatfield_manifest}, auto_path={auto_flatfield_manifest}, exists={auto_flatfield_manifest.exists()}")
+            
             # Priority: explicit manifest > auto-discovered > compute new
             if self.params.flatfield_manifest:
                 # User explicitly specified a manifest
@@ -692,11 +694,16 @@ class Stitcher:
                 from .flatfield_utils import load_flatfield_correction
                 logging.info(f"Loading existing flatfields from: {auto_flatfield_manifest}")
                 try:
-                    self.computed_parameters.flatfields = load_flatfield_correction(
+                    loaded_flatfields = load_flatfield_correction(
                         auto_flatfield_manifest,
                         self.computed_parameters,
                     )
-                    logging.info("Successfully loaded existing flatfields")
+                    if loaded_flatfields:
+                        self.computed_parameters.flatfields = loaded_flatfields
+                        logging.info("Successfully loaded existing flatfields")
+                    else:
+                        logging.warning("Flatfield manifest exists but no valid flatfields loaded. Computing new ones.")
+                        self.computed_parameters.flatfields = None
                 except Exception as e:
                     logging.warning(f"Failed to load existing flatfields: {e}. Computing new ones.")
                     # Fall through to compute new flatfields

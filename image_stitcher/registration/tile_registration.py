@@ -580,17 +580,11 @@ def register_tiles_batched(
     print("\nDEBUG: FOV to Grid Position Mapping:")
     print("=" * 80)
     for i, (filename, row, col) in enumerate(zip(all_filenames[:20], rows[:20], cols[:20])):  # Show first 20
-        # Extract FOV from filename
-        m = DEFAULT_FOV_RE.search(filename)
+        # Extract FOV from filename using the proper parser
+        fov_info = parse_filename_fov_info(filename)
         fov_num = "UNKNOWN"
-        if m:
-            try:
-                if 'fov' in m.groupdict():
-                    fov_num = m.group('fov')
-                else:
-                    fov_num = m.group(1)
-            except Exception:
-                pass
+        if fov_info and 'fov' in fov_info:
+            fov_num = str(fov_info['fov'])
         
         # Get stage coordinates
         coord_idx = filename_to_index.get(filename, "NOT_FOUND")
@@ -716,7 +710,7 @@ def register_tiles_batched(
         )
     
     # Load first image once for both memory estimation and flatfield validation
-    first_image = tifffile.imread(str(selected_tiff_paths[0]))
+    _, first_image = load_single_image(selected_tiff_paths[0], flatfield=None)
     
     # Get flatfield for registration (use specified channel)
     flatfield_for_registration = None

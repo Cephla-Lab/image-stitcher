@@ -519,50 +519,90 @@ class StitchingGUI(QWidget):
             
             if perform_registration and flatfield_mode != FlatfieldModeOption.NONE:
                 if flatfield_mode == FlatfieldModeOption.COMPUTE:
-                    # Compute flatfields before registration
-                    self.statusLabel.setText("Status: Computing flatfields...")
-                    self.progressBar.setRange(0, 0)
-                    self.progressBar.show()
-                    QApplication.processEvents()  # Update UI
+                    # Check if flatfields already exist
+                    acquisition_folder = pathlib.Path(self.inputDirectory)
+                    flatfield_dir = acquisition_folder / "flatfields"
+                    auto_flatfield_manifest = flatfield_dir / "flatfield_manifest.json"
                     
-                    try:
-                        # Create temporary stitching parameters to compute flatfields
-                        temp_params = StitchingParameters(
-                            input_folder=self.inputDirectory,
-                            output_format=OutputFormat.ome_zarr,
-                            scan_pattern=ScanPattern.unidirectional,
-                            apply_flatfield=False  # Don't apply, just compute
-                        )
-                        temp_stitcher = Stitcher(temp_params)
+                    if auto_flatfield_manifest.exists():
+                        # Try to load existing flatfields instead of recomputing
+                        self.statusLabel.setText("Status: Loading existing flatfields...")
+                        QApplication.processEvents()
+                        logging.info(f"Found existing flatfields at {auto_flatfield_manifest}, loading instead of recomputing")
                         
-                        # Compute flatfields
-                        from .flatfield_correction import compute_flatfield_correction
-                        flatfield_corrections = compute_flatfield_correction(
-                            temp_stitcher.computed_parameters,
-                            lambda: None  # No progress callback needed
-                        )
-                        
-                        # Save flatfields for later use
-                        if flatfield_corrections:
-                            from .flatfield_utils import save_flatfield_correction
-                            acquisition_folder = pathlib.Path(self.inputDirectory)
-                            flatfield_dir = acquisition_folder / "flatfields"
-                            flatfield_manifest = save_flatfield_correction(
-                                flatfield_corrections,
-                                temp_stitcher.computed_parameters,
-                                flatfield_dir
+                        try:
+                            from .flatfield_utils import load_flatfield_correction
+                            temp_params = StitchingParameters(
+                                input_folder=self.inputDirectory,
+                                output_format=OutputFormat.ome_zarr,
+                                scan_pattern=ScanPattern.unidirectional
                             )
-                            self.computed_flatfields = flatfield_corrections
-                            self.flatfield_computed_params = temp_stitcher.computed_parameters
-                            logging.info(f"Computed flatfields saved to {flatfield_dir}")
-                        
-                    except Exception as e:
-                        logging.error(f"Failed to compute flatfields: {e}")
-                        QMessageBox.warning(
-                            self, "Flatfield Warning", 
-                            f"Failed to compute flatfields: {e}\nContinuing registration without flatfield correction."
-                        )
+                            temp_stitcher = Stitcher(temp_params)
+                            
+                            flatfield_corrections = load_flatfield_correction(
+                                auto_flatfield_manifest,
+                                temp_stitcher.computed_parameters
+                            )
+                            
+                            if flatfield_corrections:
+                                self.computed_flatfields = flatfield_corrections
+                                self.flatfield_computed_params = temp_stitcher.computed_parameters
+                                flatfield_manifest = auto_flatfield_manifest
+                                logging.info(f"Successfully loaded existing flatfields from {auto_flatfield_manifest}")
+                            else:
+                                # Manifest exists but no valid flatfields, compute new ones
+                                logging.warning("Existing flatfield manifest found but no valid flatfields loaded. Computing new ones.")
+                                flatfield_corrections = None
+                                
+                        except Exception as e:
+                            logging.warning(f"Failed to load existing flatfields: {e}. Computing new ones.")
+                            flatfield_corrections = None
+                    else:
                         flatfield_corrections = None
+                    
+                    # Compute flatfields if not loaded from existing
+                    if not flatfield_corrections:
+                        self.statusLabel.setText("Status: Computing flatfields...")
+                        self.progressBar.setRange(0, 0)
+                        self.progressBar.show()
+                        QApplication.processEvents()  # Update UI
+                        
+                        try:
+                            # Create temporary stitching parameters to compute flatfields
+                            temp_params = StitchingParameters(
+                                input_folder=self.inputDirectory,
+                                output_format=OutputFormat.ome_zarr,
+                                scan_pattern=ScanPattern.unidirectional,
+                                apply_flatfield=False  # Don't apply, just compute
+                            )
+                            temp_stitcher = Stitcher(temp_params)
+                            
+                            # Compute flatfields
+                            from .flatfield_correction import compute_flatfield_correction
+                            flatfield_corrections = compute_flatfield_correction(
+                                temp_stitcher.computed_parameters,
+                                lambda: None  # No progress callback needed
+                            )
+                            
+                            # Save flatfields for later use
+                            if flatfield_corrections:
+                                from .flatfield_utils import save_flatfield_correction
+                                flatfield_manifest = save_flatfield_correction(
+                                    flatfield_corrections,
+                                    temp_stitcher.computed_parameters,
+                                    flatfield_dir
+                                )
+                                self.computed_flatfields = flatfield_corrections
+                                self.flatfield_computed_params = temp_stitcher.computed_parameters
+                                logging.info(f"Computed flatfields saved to {flatfield_dir}, manifest at {flatfield_manifest}")
+                            
+                        except Exception as e:
+                            logging.error(f"Failed to compute flatfields: {e}")
+                            QMessageBox.warning(
+                                self, "Flatfield Warning", 
+                                f"Failed to compute flatfields: {e}\nContinuing registration without flatfield correction."
+                            )
+                            flatfield_corrections = None
                         
                 elif flatfield_mode == FlatfieldModeOption.LOAD:
                     # Load precomputed flatfields
@@ -606,9 +646,12 @@ class StitchingGUI(QWidget):
                 return
 
             apply_flatfield = flatfield_mode != FlatfieldModeOption.NONE
-            if not perform_registration:
-                # If not performing registration, use manifest from GUI for stitching
-                flatfield_manifest = self.flatfield_manifest if flatfield_mode == FlatfieldModeOption.LOAD else None
+            # For stitching: use explicit manifest only when LOAD mode
+            # For COMPUTE mode, let stitcher auto-discover the saved flatfields
+            if flatfield_mode == FlatfieldModeOption.LOAD:
+                flatfield_manifest = self.flatfield_manifest
+            else:
+                flatfield_manifest = None
 
             # Determine z-layer selection strategy
             z_layer_mode = self.zLayerModeCombo.currentIndex()
