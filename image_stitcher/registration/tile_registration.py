@@ -1328,7 +1328,7 @@ def extract_tile_indices(
     y_col_name: str = DEFAULT_Y_COL,
     ROW_TOL_FACTOR: float = 0.20,
     COL_TOL_FACTOR: float = 0.20
-) -> Tuple[List[int], List[int], Dict[str, int]]:
+) -> Tuple[List[int], List[int], Dict[str, int], Dict[int, int]]:
     """
     Map each filename to (row, col) based on stage coordinates.
     Handles rows of different length that are centred or truncated.
@@ -1354,7 +1354,7 @@ def extract_tile_indices(
     """
     if not filenames:
         logger.info("Received empty filenames list, returning empty results.")
-        return [], [], {}
+        return [], [], {}, {}
 
     # --- Validate DataFrame columns ---
     required_cols = [fov_col_name, x_col_name, y_col_name]
@@ -1378,36 +1378,18 @@ def extract_tile_indices(
                 if fov_info and 'fov' in fov_info:
                     fovs_in_use.add(fov_info['fov'])
             
-            # Calculate middle z-positions for each FOV
-            fov_middle_z_positions = {}
-            for fov in fovs_in_use:
+            # Force selection of middle z-layer by index for all FOVs
+            print("Using index-based middle z-layer selection for registration")
+            logger.info("Using index-based middle z-layer selection for registration")
+            for fov in sorted(fovs_in_use):
                 fov_rows = coords_df[coords_df[fov_col_name].astype(int) == fov].sort_values('z_level')
                 if len(fov_rows) > 0:
                     middle_idx = len(fov_rows) // 2
-                    fov_middle_z_positions[fov] = fov_rows.iloc[middle_idx]['z (um)']
-            
-            # Check if z-positions differ
-            if fov_middle_z_positions:
-                z_positions = list(fov_middle_z_positions.values())
-                z_mean = np.mean(z_positions)
-                z_range = max(z_positions) - min(z_positions)
-                
-                logger.info(f"OME-TIFF z-position check: middle z-slices at {z_mean:.2f}±{np.std(z_positions):.2f}µm (range: {z_range:.2f}µm)")
-                
-                if z_range > 0.5:
-                    logger.warning(
-                        f"FOVs have different z-positions at middle slice (range: {z_range:.2f}µm). "
-                        f"Using z-position-aware coordinate extraction."
-                    )
-                    # Find closest z-level to target mean for each FOV
-                    for fov in fovs_in_use:
-                        fov_rows = coords_df[coords_df[fov_col_name].astype(int) == fov].sort_values('z_level')
-                        if len(fov_rows) > 0:
-                            z_positions_for_fov = fov_rows['z (um)'].values
-                            closest_idx = np.argmin(np.abs(z_positions_for_fov - z_mean))
-                            z_level_to_use = fov_rows.iloc[closest_idx]['z_level']
-                            fov_to_z_level[fov] = int(z_level_to_use)
-                            logger.warning(f"  → FOV {fov}: will use z_level={z_level_to_use} (z={z_positions_for_fov[closest_idx]:.2f}µm, target={z_mean:.2f}µm)")
+                    z_level_to_use = fov_rows.iloc[middle_idx]['z_level']
+                    z_position = fov_rows.iloc[middle_idx]['z (um)']
+                    fov_to_z_level[fov] = int(z_level_to_use)
+                    print(f"  → FOV {fov}: using middle z_level={z_level_to_use} (index {middle_idx}/{len(fov_rows)}, z={z_position:.2f}µm)")
+                    logger.info(f"  → FOV {fov}: using middle z_level={z_level_to_use} (index {middle_idx}/{len(fov_rows)}, z={z_position:.2f}µm)")
 
     xy_coords: List[Tuple[float, float]] = []
     fname_to_dfidx_map: Dict[str, int] = {}

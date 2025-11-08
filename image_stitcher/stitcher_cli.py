@@ -9,7 +9,7 @@ from image_stitcher.stitcher import Stitcher
 
 def main(args: list[str]) -> None:
     params = CliApp.run(StitchingParameters, cli_args=args)
-    log_level = logging.DEBUG if params.verbose else logging.INFO
+    log_level = logging.DEBUG  # Default to INFO level
     logging.basicConfig(level=log_level)
     # fsspec debug logs are very spammy
     logging.getLogger("fsspec.local").setLevel(logging.INFO)
