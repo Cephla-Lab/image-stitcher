@@ -106,15 +106,21 @@ def compute_image_overlap2(
     """
     validate_grid_dataframe(grid, direction)
     
-    # Get normalized translations
+    # Get normalized translations (divide by image dimensions to get fraction)
     translation: NDArray = np.array([
         grid[f"{direction}_y_first"].values / sizeY,
         grid[f"{direction}_x_first"].values / sizeX,
     ])
     
-    # Remove NaN values
+    # Remove NaN values and track which rows are valid
     valid_mask = np.all(np.isfinite(translation), axis=0)
     translation = translation[:, valid_mask]
+    
+    # Get filenames for valid translations
+    if 'filename' in grid.columns:
+        valid_filenames = grid['filename'].values[valid_mask]
+    else:
+        valid_filenames = [f"Index_{grid.index[i]}" for i in np.where(valid_mask)[0]]
     
     if translation.shape[1] < MIN_VALID_TRANSLATIONS:
         raise ValueError(
@@ -122,8 +128,30 @@ def compute_image_overlap2(
             f"Need at least {MIN_VALID_TRANSLATIONS}."
         )
     
+    # Print all individual overlap values for manual analysis
+    print(f"\n{'='*80}")
+    print(f"Direction: {direction}")
+    print(f"Number of valid translations: {translation.shape[1]}")
+    print(f"{'='*80}")
+    print(f"Individual overlap values (y, x) as fractions:")
+    for i in range(translation.shape[1]):
+        y_overlap = translation[0, i]
+        x_overlap = translation[1, i]
+        filename = valid_filenames[i] if i < len(valid_filenames) else "UNKNOWN"
+        print(f"  Pair {i+1:3d} [{filename}]: y={y_overlap:7.4f} ({y_overlap*100:6.2f}%), x={x_overlap:7.4f} ({x_overlap*100:6.2f}%)")
+    
     # Compute median overlap
     overlap = np.median(translation, axis=1)
+    
+    # Print statistics
+    print(f"\nStatistics:")
+    print(f"  Y-overlap: median={overlap[0]:7.4f} ({overlap[0]*100:6.2f}%), "
+          f"mean={np.mean(translation[0]):7.4f} ({np.mean(translation[0])*100:6.2f}%), "
+          f"std={np.std(translation[0]):7.4f} ({np.std(translation[0])*100:6.2f}%)")
+    print(f"  X-overlap: median={overlap[1]:7.4f} ({overlap[1]*100:6.2f}%), "
+          f"mean={np.mean(translation[1]):7.4f} ({np.mean(translation[1])*100:6.2f}%), "
+          f"std={np.std(translation[1]):7.4f} ({np.std(translation[1])*100:6.2f}%)")
+    print(f"{'='*80}\n")
     
     # Log overlap values for debugging
     logger.debug(f"Computed {direction} overlap: y={overlap[0]:.3f}, x={overlap[1]:.3f}")

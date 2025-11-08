@@ -458,7 +458,7 @@ class StitchingComputedParameters:
                     num_z_slices = meta['num_z']
                     channel_names = meta.get('channel_names') or [f"channel_{i}" for i in range(num_channels)]
                     
-                    logging.debug(f"OME-TIFF {ome_file.name}: {num_channels} channels, {num_z_slices} z-slices")
+                    logging.info(f"OME-TIFF {ome_file.name}: detected {len(channel_names)} channels out of {num_channels} total, {num_z_slices} z-slices. Channel names: {channel_names}")
                     
                     # Get coordinates for this region/fov
                     fov_coords = coordinates_df[

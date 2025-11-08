@@ -288,7 +288,9 @@ def load_batch_for_neighborhoods(
     neighborhood_batch: List[Neighborhood],
     selected_tiff_paths: List[Path],
     all_filenames: List[str],
-    flatfield: Optional[np.ndarray] = None
+    flatfield: Optional[np.ndarray] = None,
+    fov_to_z_level: Optional[Dict[int, int]] = None,
+    channel: int = 0
 ) -> Tuple[Dict[str, np.ndarray], List[int]]:
     """Load all unique images needed for a batch of neighborhoods."""
     
@@ -301,7 +303,7 @@ def load_batch_for_neighborhoods(
     
     # Load all needed images
     needed_paths = [selected_tiff_paths[i] for i in needed_indices_list]
-    batch_images = load_batch_images(needed_paths, flatfield=flatfield)
+    batch_images = load_batch_images(needed_paths, flatfield=flatfield, fov_to_z_level=fov_to_z_level, channel=channel)
     
     return batch_images, needed_indices_list
 
@@ -375,6 +377,124 @@ def process_neighborhood_batch(
     
     return results
 
+def select_best_registration_channel(
+    selected_tiff_paths: List[Path],
+    region_coords: pd.DataFrame,
+    edge_width: int = DEFAULT_EDGE_WIDTH,
+    num_sample_fovs: int = 3,
+    fov_to_z_level: Optional[Dict[int, int]] = None
+) -> int:
+    """Select the channel with highest edge variance for registration.
+    
+    Samples random FOVs, loads all available channels, and computes edge variance
+    to determine which channel has the most features for reliable registration.
+    
+    Args:
+        selected_tiff_paths: List of image file paths
+        region_coords: Coordinates DataFrame
+        edge_width: Width of edge strips to check
+        num_sample_fovs: Number of random FOVs to sample (default 3)
+        fov_to_z_level: Optional z-level mapping for OME-TIFF files
+        
+    Returns:
+        Best channel index (0-based) to use for registration
+    """
+    from ..image_loaders import create_image_loader
+    
+    # For OME-TIFF files, check all channels in the files
+    is_ome_tiff = any(p.name.lower().endswith(('.ome.tif', '.ome.tiff')) for p in selected_tiff_paths)
+    
+    if not is_ome_tiff:
+        logger.info("Not OME-TIFF format - using default channel 0 for registration")
+        return 0
+    
+    # Get unique FOVs
+    fovs = set()
+    for path in selected_tiff_paths:
+        fov_info = parse_filename_fov_info(path.name)
+        if fov_info and 'fov' in fov_info:
+            fovs.add(fov_info['fov'])
+    
+    # Sample random FOVs
+    sample_fovs = list(fovs)[:num_sample_fovs] if len(fovs) <= num_sample_fovs else list(np.random.choice(list(fovs), num_sample_fovs, replace=False))
+    
+    logger.info(f"Checking edge variance across channels for {len(sample_fovs)} random FOVs: {sample_fovs}")
+    
+    # Load sample images and compute edge variance per channel
+    channel_variances = {}
+    channel_names = None  # Will be populated from first FOV
+    
+    for fov in sample_fovs:
+        # Find path for this FOV
+        fov_path = None
+        for path in selected_tiff_paths:
+            fov_info = parse_filename_fov_info(path.name)
+            if fov_info and fov_info.get('fov') == fov:
+                fov_path = path
+                break
+        
+        if not fov_path:
+            continue
+        
+        try:
+            loader = create_image_loader(fov_path, format_hint='ome_tiff')
+            meta = loader.metadata
+            num_channels = meta.get('num_channels', 1)
+            
+            # Extract channel names/wavelengths from metadata (first FOV only)
+            if channel_names is None:
+                channel_names = meta.get('channel_names', None)
+            
+            # Determine z-index
+            z_idx = meta['num_z'] // 2 if meta['num_z'] > 1 else 0
+            if fov_to_z_level and fov in fov_to_z_level:
+                z_idx = fov_to_z_level[fov]
+            
+            # Check each channel
+            for ch in range(num_channels):
+                img = loader.read_slice(channel=ch, z=z_idx)
+                
+                # Extract right edge (most common overlap direction)
+                current_w = min(edge_width, img.shape[1])
+                edge = img[:, -current_w:]
+                
+                # Compute variance (same as is_edge_featureless)
+                downsampled = edge[::16, ::16]
+                if downsampled.size > 0:
+                    variance = np.var(downsampled.astype(np.float32))
+                    
+                    if ch not in channel_variances:
+                        channel_variances[ch] = []
+                    channel_variances[ch].append(variance)
+        
+        except Exception as e:
+            logger.warning(f"Failed to check channels for FOV {fov}: {e}")
+            continue
+    
+    if not channel_variances:
+        logger.warning("Could not compute channel variances - using default channel 0")
+        return 0
+    
+    # Compute mean variance per channel
+    channel_mean_variance = {ch: np.mean(vars) for ch, vars in channel_variances.items()}
+    best_channel = max(channel_mean_variance.items(), key=lambda x: x[1])[0]
+    
+    # Format channel names for display
+    def format_channel_name(ch_idx: int) -> str:
+        """Format channel name with wavelength if available."""
+        if channel_names and ch_idx < len(channel_names):
+            return f"{channel_names[ch_idx]}"
+        return f"Channel {ch_idx}"
+    
+    logger.warning(f"Channel variance analysis (mean across {len(sample_fovs)} FOVs):")
+    for ch in sorted(channel_mean_variance.keys()):
+        status = " ← SELECTED" if ch == best_channel else ""
+        ch_name = format_channel_name(ch)
+        logger.warning(f"  {ch_name}: variance={channel_mean_variance[ch]:.2e}{status}")
+    
+    return best_channel
+
+
 def is_edge_featureless(edge: np.ndarray, variance_threshold: float = 2e5) -> bool:
     """Check if edge strip is featureless (dust speckles only, no tissue).
     
@@ -392,8 +512,18 @@ def is_edge_featureless(edge: np.ndarray, variance_threshold: float = 2e5) -> bo
     downsampled = edge[::16, ::16]
     if downsampled.size == 0:
         return True  # Empty edge is featureless
+    
     variance = np.var(downsampled.astype(np.float32))
-    return variance < variance_threshold
+    is_featureless = variance < variance_threshold
+    
+    if is_featureless:
+        logger.warning(
+            f"Edge rejected as featureless: variance={variance:.2e} < threshold={variance_threshold:.2e}. "
+            f"Edge shape={edge.shape}, intensity range=[{edge.min()}, {edge.max()}]. "
+            f"Consider using a different channel for registration if multiple channels are available."
+        )
+    
+    return is_featureless
 
 def compute_single_translation(
     image1_full: np.ndarray,
@@ -476,21 +606,26 @@ def calculate_safe_batch_size(first_image_path: Path, memory_fraction: float = 0
     return max_batch_size
 
 
-def _load_image_no_flatfield(path: Path) -> Tuple[str, Optional[np.ndarray]]:
+def _load_image_wrapper(args: Tuple[Path, Optional[Dict[int, int]], int]) -> Tuple[str, Optional[np.ndarray]]:
     """Load image without flatfield correction (for multiprocessing)."""
-    return load_single_image(path, flatfield=None)
+    path, fov_to_z_level, channel = args
+    return load_single_image(path, flatfield=None, fov_to_z_level=fov_to_z_level, channel=channel)
 
 def load_batch_images(
     batch_paths: List[Path], 
-    flatfield: Optional[np.ndarray] = None
+    flatfield: Optional[np.ndarray] = None,
+    fov_to_z_level: Optional[Dict[int, int]] = None,
+    channel: int = 0
 ) -> Dict[str, np.ndarray]:
     """Load a batch of images using multiprocessing, apply flatfield serially."""
     n_processes = min(cpu_count(), len(batch_paths))
     
     # Load images in parallel without flatfield
+    # Pack fov_to_z_level and channel with each path for multiprocessing
+    args_list = [(path, fov_to_z_level, channel) for path in batch_paths]
     with Pool(processes=n_processes) as pool:
         results = list(tqdm(
-            pool.imap(_load_image_no_flatfield, batch_paths),
+            pool.imap(_load_image_wrapper, args_list),
             total=len(batch_paths),
             desc="Loading batch"
         ))
@@ -569,7 +704,7 @@ def register_tiles_batched(
     
     # Create complete grid structure BEFORE batching
     all_filenames = [p.name for p in selected_tiff_paths]
-    rows, cols, filename_to_index = extract_tile_indices(all_filenames, region_coords)
+    rows, cols, filename_to_index, fov_to_z_level = extract_tile_indices(all_filenames, region_coords)
     
     # DEBUG: Show grid structure
     print(f"DEBUG: Grid dimensions: {len(rows)} tiles, {len(set(rows))} unique rows, {len(set(cols))} unique columns")
@@ -618,6 +753,7 @@ def register_tiles_batched(
         "row": rows,
         "stage_x": stage_x_list,
         "stage_y": stage_y_list,
+        "filename": all_filenames,
     }, index=np.arange(len(cols)))
     
     # DEBUG: Show grid occupancy matrix
@@ -709,8 +845,21 @@ def register_tiles_batched(
             f"neighbor relationships. Check that tiles have proper row/col assignments."
         )
     
+    # Auto-select best registration channel if default channel 0 has low variance
+    if registration_channel == 0:
+        best_channel = select_best_registration_channel(
+            selected_tiff_paths, 
+            region_coords,
+            edge_width=edge_width,
+            num_sample_fovs=3,
+            fov_to_z_level=fov_to_z_level
+        )
+        if best_channel != 0:
+            logger.warning(f"Auto-selected channel {best_channel} for registration (default channel 0 has low variance)")
+            registration_channel = best_channel
+    
     # Load first image once for both memory estimation and flatfield validation
-    _, first_image = load_single_image(selected_tiff_paths[0], flatfield=None)
+    _, first_image = load_single_image(selected_tiff_paths[0], flatfield=None, fov_to_z_level=fov_to_z_level)
     
     # Get flatfield for registration (use specified channel)
     flatfield_for_registration = None
@@ -767,7 +916,9 @@ def register_tiles_batched(
         # Load all images needed for this batch
         batch_images, needed_indices = load_batch_for_neighborhoods(
             neighborhood_batch, selected_tiff_paths, all_filenames,
-            flatfield=flatfield_for_registration
+            flatfield=flatfield_for_registration,
+            fov_to_z_level=fov_to_z_level,
+            channel=registration_channel
         )
         
         print(f"DEBUG: Loaded {len(batch_images)} unique images for {len(needed_indices)} indices")
@@ -827,11 +978,10 @@ def register_tiles_batched(
     if not has_left_pairs and not has_top_pairs:
         raise ValueError("No good initial pairs found - tiles may not have sufficient overlap")
     
-    # Get image dimensions from first batch for overlap calculation
-    first_image = tifffile.imread(str(selected_tiff_paths[0]))
-    full_sizeY, full_sizeX = first_image.shape[:2]
-    del first_image
-    gc.collect()
+    # Get standardized image dimensions (always returns Y, X regardless of format)
+    from ..image_loaders import get_image_dimensions
+    full_sizeY, full_sizeX = get_image_dimensions(selected_tiff_paths[0])
+    print(f"DEBUG: Image dimensions: Y={full_sizeY}, X={full_sizeX}")
     
     # Compute overlaps and continue with existing logic
     if has_left_pairs:
@@ -1196,7 +1346,8 @@ def extract_tile_indices(
         COL_TOL_FACTOR: Tolerance factor for column clustering (percentage of X pitch).
 
     Returns:
-        A tuple: (row_assignments, col_assignments, fname_to_dfidx_map)
+        A tuple: (row_assignments, col_assignments, fname_to_dfidx_map, fov_to_z_level)
+        fov_to_z_level is a dict mapping FOV number to z-level index for OME-TIFF files
         - row_assignments: List of 0-indexed row numbers for each filename.
         - col_assignments: List of 0-indexed column numbers for each filename.
         - fname_to_dfidx_map: Dictionary mapping filename to its original index in coords_df.
@@ -1214,6 +1365,50 @@ def extract_tile_indices(
             raise KeyError(msg)
 
     # 1.  Collect (x, y) per filename
+    # 0. PRE-CALCULATE z-level mapping for OME-TIFFs (before coordinate extraction)
+    fov_to_z_level: Dict[int, int] = {}
+    if 'z (um)' in coords_df.columns and 'z_level' in coords_df.columns:
+        is_ome_tiff = any(fn.lower().endswith('.ome.tiff') or fn.lower().endswith('.ome.tif') 
+                         for fn in filenames)
+        if is_ome_tiff:
+            # Get all FOVs from filenames
+            fovs_in_use = set()
+            for fname in filenames:
+                fov_info = parse_filename_fov_info(fname)
+                if fov_info and 'fov' in fov_info:
+                    fovs_in_use.add(fov_info['fov'])
+            
+            # Calculate middle z-positions for each FOV
+            fov_middle_z_positions = {}
+            for fov in fovs_in_use:
+                fov_rows = coords_df[coords_df[fov_col_name].astype(int) == fov].sort_values('z_level')
+                if len(fov_rows) > 0:
+                    middle_idx = len(fov_rows) // 2
+                    fov_middle_z_positions[fov] = fov_rows.iloc[middle_idx]['z (um)']
+            
+            # Check if z-positions differ
+            if fov_middle_z_positions:
+                z_positions = list(fov_middle_z_positions.values())
+                z_mean = np.mean(z_positions)
+                z_range = max(z_positions) - min(z_positions)
+                
+                logger.info(f"OME-TIFF z-position check: middle z-slices at {z_mean:.2f}±{np.std(z_positions):.2f}µm (range: {z_range:.2f}µm)")
+                
+                if z_range > 0.5:
+                    logger.warning(
+                        f"FOVs have different z-positions at middle slice (range: {z_range:.2f}µm). "
+                        f"Using z-position-aware coordinate extraction."
+                    )
+                    # Find closest z-level to target mean for each FOV
+                    for fov in fovs_in_use:
+                        fov_rows = coords_df[coords_df[fov_col_name].astype(int) == fov].sort_values('z_level')
+                        if len(fov_rows) > 0:
+                            z_positions_for_fov = fov_rows['z (um)'].values
+                            closest_idx = np.argmin(np.abs(z_positions_for_fov - z_mean))
+                            z_level_to_use = fov_rows.iloc[closest_idx]['z_level']
+                            fov_to_z_level[fov] = int(z_level_to_use)
+                            logger.warning(f"  → FOV {fov}: will use z_level={z_level_to_use} (z={z_positions_for_fov[closest_idx]:.2f}µm, target={z_mean:.2f}µm)")
+
     xy_coords: List[Tuple[float, float]] = []
     fname_to_dfidx_map: Dict[str, int] = {}
     valid_indices_in_filenames = []
@@ -1267,28 +1462,29 @@ def extract_tile_indices(
             logger.warning(f"FOV {fov} (from {fname}) not in coordinates DataFrame. Skipping this file.")
             continue
         if len(df_row) > 1:
-            logger.warning(f"FOV {fov} (from {fname}) has multiple entries. Using the first one that matches the z-level if possible.")
-            
-            # Try to find an entry that also matches the z-level from the filename
-            # For multi-page TIFFs, skip z-level refinement and let GUI/parameters control z-selection
-            z_level_fname = None
-            if fov_info and 'z_level' in fov_info:
-                z_level_fname = fov_info['z_level']
+            # Try to find an entry that matches the pre-calculated z-level (for OME-TIFFs)
+            z_level_to_use = None
+            if fov in fov_to_z_level:
+                z_level_to_use = fov_to_z_level[fov]
+                logger.debug(f"FOV {fov}: using pre-calculated z_level={z_level_to_use} for coordinate extraction")
+            # Otherwise try z-level from filename (for multi-page TIFFs)
+            elif fov_info and 'z_level' in fov_info:
+                z_level_to_use = fov_info['z_level']
             elif m and 'z_level' in m.groupdict():
                 try:
-                    z_level_fname = int(m.group('z_level'))
+                    z_level_to_use = int(m.group('z_level'))
                 except ValueError:
                     logger.warning(f"Could not parse z_level from filename {fname}.")
             
-            if z_level_fname is not None and 'z_level' in coords_df.columns:
-                matching_z_rows = df_row[df_row['z_level'].astype(int) == z_level_fname]
+            if z_level_to_use is not None and 'z_level' in coords_df.columns:
+                matching_z_rows = df_row[df_row['z_level'].astype(int) == z_level_to_use]
                 if not matching_z_rows.empty:
                     df_row = matching_z_rows
-                    logger.info(f"Refined selection for FOV {fov} to include z_level {z_level_fname}.")
-            # For multi-page TIFFs (no z_level in filename), use first entry and let z-slice filtering handle selection
+                else:
+                    logger.warning(f"FOV {fov}: z_level {z_level_to_use} not found in coords, using first entry")
             
             if len(df_row) > 1:
-                logger.warning(f"Still multiple entries for FOV {fov}. Using the first.")
+                logger.warning(f"FOV {fov}: Still multiple entries after z-level filtering. Using first.")
 
         idx = df_row.index[0]
         fname_to_dfidx_map[fname] = idx
@@ -1304,8 +1500,9 @@ def extract_tile_indices(
     if not xy_coords:
         logger.warning("No valid coordinates could be extracted. Returning empty results.")
         num_original_files = len(filenames)
-        return [-1] * num_original_files, [-1] * num_original_files, fname_to_dfidx_map
+        return [-1] * num_original_files, [-1] * num_original_files, fname_to_dfidx_map, {}
 
+    # fov_to_z_level already calculated at line 1225 (before coordinate extraction)
     x_arr, y_arr = map(np.asarray, zip(*xy_coords))
 
     # Initialize full assignment arrays with -1 (unassigned)
@@ -1373,7 +1570,7 @@ def extract_tile_indices(
 
     logger.info(f"Processed {len(xy_coords)}/{len(filenames)} files. Found {len(processed_rows)} rows and {len(col_centers_list)} columns.")
     
-    return final_row_assignments.tolist(), final_col_assignments.tolist(), fname_to_dfidx_map
+    return final_row_assignments.tolist(), final_col_assignments.tolist(), fname_to_dfidx_map, fov_to_z_level
 
 
 
@@ -1923,12 +2120,17 @@ def apply_flatfield_to_image(
     return corrected
 
 
-def load_single_image(path: Path, flatfield: Optional[np.ndarray] = None) -> Tuple[str, Optional[np.ndarray]]:
+def load_single_image(
+    path: Path, 
+    flatfield: Optional[np.ndarray] = None,
+    fov_to_z_level: Optional[Dict[int, int]] = None,
+    channel: int = 0
+) -> Tuple[str, Optional[np.ndarray]]:
     """Load a single image with error handling and optional flatfield correction.
     
     Handles regular TIFF, multi-page TIFF, and OME-TIFF files.
     For multi-page TIFF files (containing "_stack" in name), extracts the middle z-slice.
-    For OME-TIFF files, extracts middle z-slice from first channel.
+    For OME-TIFF files, extracts specified z-slice and channel, or uses z-position override.
     
     Parameters
     ----------
@@ -1936,6 +2138,10 @@ def load_single_image(path: Path, flatfield: Optional[np.ndarray] = None) -> Tup
         Path to the TIFF file
     flatfield : Optional[np.ndarray]
         Flatfield correction to apply (same shape as image)
+    fov_to_z_level : Optional[Dict[int, int]]
+        Mapping of FOV number to z-level index for OME-TIFF z-position matching
+    channel : int
+        Channel index to load for multi-channel images (default 0)
         
     Returns
     -------
@@ -1953,9 +2159,16 @@ def load_single_image(path: Path, flatfield: Optional[np.ndarray] = None) -> Tup
                 loader = create_image_loader(path, format_hint='ome_tiff')
                 meta = loader.metadata
                 
-                # Use first channel, middle z-slice for registration
-                channel_idx = 0
+                # Use specified channel, determine z-slice
+                channel_idx = channel
                 z_idx = meta['num_z'] // 2 if meta['num_z'] > 1 else 0
+                
+                # Check if there's a z-position-aware override
+                if fov_to_z_level:
+                    fov_info = parse_filename_fov_info(path.name)
+                    if fov_info and 'fov' in fov_info and fov_info['fov'] in fov_to_z_level:
+                        z_idx = fov_to_z_level[fov_info['fov']]
+                        logger.debug(f"Loading {path.name}: using z-override z_level={z_idx} for FOV {fov_info['fov']}")
                 
                 image = loader.read_slice(channel=channel_idx, z=z_idx)
                 logger.debug(f"Loaded OME-TIFF {path.name}: channel {channel_idx}, z-slice {z_idx}/{meta['num_z']}")
@@ -2066,6 +2279,7 @@ def detect_channels(directory: Union[str, Path]) -> Dict[str, List[Path]]:
     """Detect available channels in the directory.
     
     Checks both the given directory and parent's ome_tiff/ subdirectory.
+    For OME-TIFF files, reads internal channel metadata.
     
     Parameters
     ----------
@@ -2075,7 +2289,7 @@ def detect_channels(directory: Union[str, Path]) -> Dict[str, List[Path]]:
     Returns
     -------
     Dict[str, List[Path]]
-        Dictionary mapping channel type to list of file paths
+        Dictionary mapping channel type to list of file paths or channel info
     """
     directory = Path(directory)
     
@@ -2089,10 +2303,48 @@ def detect_channels(directory: Union[str, Path]) -> Dict[str, List[Path]]:
     # Channel categories
     channels = {
         "fluorescence": [],
-        "brightfield": []
+        "brightfield": [],
+        "ome_tiff_channels": {}  # Maps channel names to (file, channel_idx)
     }
     
-    # Regular expressions for channel detection
+    # Check if we have OME-TIFF files
+    ome_tiff_files = [f for f in tiff_files if '.ome.' in f.name.lower()]
+    if ome_tiff_files:
+        # Read channel info from first OME-TIFF file
+        try:
+            from ..image_loaders import create_image_loader
+            loader = create_image_loader(ome_tiff_files[0], format_hint='ome_tiff')
+            meta = loader.metadata
+            num_channels = meta['num_channels']
+            channel_names = meta.get('channel_names') or [f"channel_{i}" for i in range(num_channels)]
+            
+            logger.info(f"OME-TIFF: detected {num_channels} channels in {ome_tiff_files[0].name}: {channel_names}")
+            
+            # Categorize channels by name
+            fluor_patterns = [r"Fluorescence", r"\d+ nm", r"GFP", r"RFP", r"DAPI", r"Cy\d"]
+            bf_patterns = [r"^BF$", r"brightfield", r"bright.?field", r"phase"]
+            
+            for idx, ch_name in enumerate(channel_names):
+                is_fluor = any(re.search(pattern, ch_name, re.IGNORECASE) for pattern in fluor_patterns)
+                is_bf = any(re.search(pattern, ch_name, re.IGNORECASE) for pattern in bf_patterns)
+                
+                # Store channel info with file path and index
+                channels["ome_tiff_channels"][ch_name] = (ome_tiff_files[0], idx)
+                
+                if is_fluor:
+                    channels["fluorescence"].append((ome_tiff_files[0], idx, ch_name))
+                elif is_bf:
+                    channels["brightfield"].append((ome_tiff_files[0], idx, ch_name))
+                else:
+                    # Default to fluorescence if unclear
+                    channels["fluorescence"].append((ome_tiff_files[0], idx, ch_name))
+            
+            return channels
+        except Exception as e:
+            logger.warning(f"Failed to read OME-TIFF channel metadata: {e}")
+            # Fall through to filename-based detection
+    
+    # Regular expressions for channel detection (for non-OME-TIFF files)
     fluor_patterns = [
         r"(\d+)_nm_Ex\.tiff$",  # Matches wavelength patterns like 405_nm_Ex.tiff
         r"Fluorescence",  # Generic fluorescence indicator
@@ -2147,11 +2399,36 @@ def select_channel_pattern(directory: Union[str, Path]) -> str:
     
     channels = detect_channels(directory)
     
+    # Check if we have OME-TIFF with internal channels
+    if channels.get("ome_tiff_channels"):
+        # For OME-TIFF, we have multiple channels in the same file
+        # Select the best channel for registration (prefer fluorescence)
+        if channels["fluorescence"]:
+            # Get the first fluorescence channel (tuple format: file, idx, name)
+            file_path, channel_idx, channel_name = channels["fluorescence"][0]
+            logger.info(f"OME-TIFF: Selected channel '{channel_name}' (index {channel_idx}) out of {len(channels['ome_tiff_channels'])} total channels")
+            # Return the OME-TIFF file pattern
+            if file_path.name.lower().endswith('.ome.tiff'):
+                return "*.ome.tiff"
+            else:
+                return "*.ome.tif"
+        elif channels["brightfield"]:
+            file_path, channel_idx, channel_name = channels["brightfield"][0]
+            logger.info(f"OME-TIFF: Selected channel '{channel_name}' (index {channel_idx}) out of {len(channels['ome_tiff_channels'])} total channels")
+            if file_path.name.lower().endswith('.ome.tiff'):
+                return "*.ome.tiff"
+            else:
+                return "*.ome.tif"
+    
+    # Regular TIFF files with channels in separate files
     # Prefer fluorescence channels if available
     if channels["fluorescence"]:
         # Group fluorescence files by wavelength
         wavelengths = {}
         for file in channels["fluorescence"]:
+            # For regular TIFF, file is a Path object
+            if isinstance(file, tuple):
+                continue  # Skip OME-TIFF tuples (already handled above)
             match = re.search(r"(\d+)_nm_Ex\.tiff$", file.name)
             if match:
                 wavelength = int(match.group(1))
@@ -2167,19 +2444,21 @@ def select_channel_pattern(directory: Union[str, Path]) -> str:
             return pattern
         
         # If no wavelength pattern found, use the first fluorescence file pattern
-        example_file = channels["fluorescence"][0].name
-        pattern = f"*{example_file.split('_Fluorescence_')[-1]}"
-        print(f"Selected fluorescence channel: {pattern}")
-        return pattern
+        if channels["fluorescence"] and not isinstance(channels["fluorescence"][0], tuple):
+            example_file = channels["fluorescence"][0].name
+            pattern = f"*{example_file.split('_Fluorescence_')[-1]}"
+            print(f"Selected fluorescence channel: {pattern}")
+            return pattern
     
     # Fall back to brightfield if available
     if channels["brightfield"]:
-        example_file = channels["brightfield"][0].name
-        if len(channels["brightfield"]) > 1:
-            print("Warning: Multiple brightfield files found, using first one as pattern")
-        pattern = f"*{example_file.split('_BF_')[-1]}"
-        print(f"Selected brightfield channel: {pattern}")
-        return pattern
+        if not isinstance(channels["brightfield"][0], tuple):
+            example_file = channels["brightfield"][0].name
+            if len(channels["brightfield"]) > 1:
+                print("Warning: Multiple brightfield files found, using first one as pattern")
+            pattern = f"*{example_file.split('_BF_')[-1]}"
+            print(f"Selected brightfield channel: {pattern}")
+            return pattern
     
     # If no specific patterns found, check for OME-TIFF files first, then regular TIFF
     # Check for OME-TIFF files (.ome.tif or .ome.tiff)
@@ -2506,7 +2785,7 @@ def register_and_update_coordinates(
         
         # Extract tile indices from filenames
         filenames = [p.name for p in selected_tiff_paths]
-        rows, cols, filename_to_index = extract_tile_indices(filenames, region_coords)
+        rows, cols, filename_to_index, fov_to_z_level = extract_tile_indices(filenames, region_coords)
         
         try:
             # Register tiles using batched processing

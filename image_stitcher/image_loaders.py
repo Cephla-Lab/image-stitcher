@@ -3,6 +3,19 @@
 This module provides a unified interface for loading images from various
 file formats used in microscopy, including individual TIFF files, multi-page
 TIFF files, and OME-TIFF files.
+
+DESIGN PRINCIPLE: Standardized Axes
+------------------------------------
+All loaders normalize their output to a consistent (Y, X) format for 2D images,
+regardless of the underlying file format's axis ordering. This prevents bugs
+caused by format-specific dimension ordering (e.g., OME-TIFF's (Z, C, Y, X) vs
+single TIFF's (Y, X)). The complexity of different formats is handled once at
+the loader boundary, not scattered throughout the codebase.
+
+Key functions:
+- read_slice(): Always returns (Y, X) array
+- metadata['shape']: Always (height, width) tuple
+- get_image_dimensions(): Convenience function for dimension queries
 """
 
 from abc import ABC, abstractmethod
@@ -194,6 +207,7 @@ class OMETiffLoader(ImageLoader):
         """Parse OME-XML metadata."""
         if self._metadata is None:
             import tifffile
+            import logging
             with tifffile.TiffFile(self.filepath) as tif:
                 # Use tifffile's built-in OME metadata parsing
                 if not tif.is_ome:
@@ -207,6 +221,8 @@ class OMETiffLoader(ImageLoader):
                 axes = series.axes
                 shape_dict = dict(zip(axes, series.shape))
                 
+                logging.info(f"OME-TIFF {self.filepath.name}: axes='{axes}', shape={series.shape}, shape_dict={shape_dict}")
+                
                 num_channels = shape_dict.get('C', 1)
                 num_z = shape_dict.get('Z', 1)
                 num_t = shape_dict.get('T', 1)
@@ -217,6 +233,8 @@ class OMETiffLoader(ImageLoader):
                 channel_names = None
                 if tif.ome_metadata:
                     channel_names = self._extract_channel_names(tif.ome_metadata)
+                
+                logging.info(f"OME-TIFF {self.filepath.name}: detected {num_channels} channels, {num_z} z-slices. Channel names: {channel_names}")
                 
                 self._metadata = {
                     'num_channels': num_channels,
@@ -432,4 +450,26 @@ def create_image_loader(filepath: Path, format_hint: Optional[str] = None) -> Im
         return MultiPageTiffLoader(filepath)
     else:
         return IndividualFileLoader(filepath)
+
+
+def get_image_dimensions(filepath: Path) -> Tuple[int, int]:
+    """Get standardized (height, width) dimensions from any image format.
+    
+    This function abstracts away the complexity of different file formats
+    and dimension orderings, always returning (Y, X) dimensions.
+    
+    Args:
+        filepath: Path to the image file
+        
+    Returns:
+        Tuple of (height, width) in pixels
+        
+    Example:
+        >>> height, width = get_image_dimensions(Path("data.ome.tiff"))
+        >>> print(f"Image is {height}x{width} pixels")
+    """
+    loader = create_image_loader(filepath)
+    metadata = loader.metadata
+    height, width = metadata['shape']
+    return height, width
 
