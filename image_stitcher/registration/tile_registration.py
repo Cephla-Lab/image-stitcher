@@ -389,70 +389,75 @@ def select_best_registration_channel(
     Samples random FOVs, loads all available channels, and computes edge variance
     to determine which channel has the most features for reliable registration.
     
+    Works with both OME-TIFF files (multiple channels per file) and individual
+    TIFF files (one file per channel).
+    
     Args:
         selected_tiff_paths: List of image file paths
         region_coords: Coordinates DataFrame
         edge_width: Width of edge strips to check
         num_sample_fovs: Number of random FOVs to sample (default 3)
-        fov_to_z_level: Optional z-level mapping for OME-TIFF files
+        fov_to_z_level: Optional z-level mapping for multi-z datasets
         
     Returns:
         Best channel index (0-based) to use for registration
     """
-    from ..image_loaders import create_image_loader
+    from ..image_loaders import ChannelSource
     
-    # For OME-TIFF files, check all channels in the files
-    is_ome_tiff = any(p.name.lower().endswith(('.ome.tif', '.ome.tiff')) for p in selected_tiff_paths)
-    
-    if not is_ome_tiff:
-        logger.info("Not OME-TIFF format - using default channel 0 for registration")
-        return 0
-    
-    # Get unique FOVs
-    fovs = set()
+    # Get unique FOVs and regions
+    fov_region_pairs = set()
     for path in selected_tiff_paths:
         fov_info = parse_filename_fov_info(path.name)
         if fov_info and 'fov' in fov_info:
-            fovs.add(fov_info['fov'])
+            region = fov_info.get('region', 'Unknown')
+            fov = fov_info['fov']
+            fov_region_pairs.add((region, fov))
+    
+    if not fov_region_pairs:
+        logger.warning("Could not parse any FOV information from filenames - using default channel 0")
+        return 0
     
     # Sample random FOVs
-    sample_fovs = list(fovs)[:num_sample_fovs] if len(fovs) <= num_sample_fovs else list(np.random.choice(list(fovs), num_sample_fovs, replace=False))
+    fov_region_list = list(fov_region_pairs)
+    if len(fov_region_list) <= num_sample_fovs:
+        sample_pairs = fov_region_list
+    else:
+        sample_indices = np.random.choice(len(fov_region_list), num_sample_fovs, replace=False)
+        sample_pairs = [fov_region_list[i] for i in sample_indices]
     
-    logger.info(f"Checking edge variance across channels for {len(sample_fovs)} random FOVs: {sample_fovs}")
+    logger.info(f"Checking edge variance across channels for {len(sample_pairs)} random FOVs: {sample_pairs}")
     
-    # Load sample images and compute edge variance per channel
+    # Compute edge variance per channel across sampled FOVs
     channel_variances = {}
-    channel_names = None  # Will be populated from first FOV
+    all_channel_names = None
     
-    for fov in sample_fovs:
-        # Find path for this FOV
-        fov_path = None
-        for path in selected_tiff_paths:
-            fov_info = parse_filename_fov_info(path.name)
-            if fov_info and fov_info.get('fov') == fov:
-                fov_path = path
-                break
-        
-        if not fov_path:
-            continue
-        
+    for region, fov in sample_pairs:
         try:
-            loader = create_image_loader(fov_path, format_hint='ome_tiff')
-            meta = loader.metadata
-            num_channels = meta.get('num_channels', 1)
+            # Determine z-level for this FOV
+            z_level = fov_to_z_level.get(fov) if fov_to_z_level else None
             
-            # Extract channel names/wavelengths from metadata (first FOV only)
-            if channel_names is None:
-                channel_names = meta.get('channel_names', None)
+            # Discover channels for this FOV (format-agnostic)
+            descriptors = ChannelSource.discover(
+                files=selected_tiff_paths,
+                region=region,
+                fov=fov,
+                z_level=z_level
+            )
             
-            # Determine z-index
-            z_idx = meta['num_z'] // 2 if meta['num_z'] > 1 else 0
-            if fov_to_z_level and fov in fov_to_z_level:
-                z_idx = fov_to_z_level[fov]
+            if not descriptors:
+                logger.warning(f"No channels found for FOV {region}_{fov}")
+                continue
             
-            # Check each channel
-            for ch in range(num_channels):
-                img = loader.read_slice(channel=ch, z=z_idx)
+            # Store channel names from first FOV for display
+            if all_channel_names is None:
+                all_channel_names = [desc.name for desc in descriptors]
+            
+            # Compute variance for each channel
+            for desc in descriptors:
+                img = desc.loader.read_slice(
+                    channel=desc.channel_param,
+                    z=desc.z_param
+                )
                 
                 # Extract right edge (most common overlap direction)
                 current_w = min(edge_width, img.shape[1])
@@ -463,39 +468,33 @@ def select_best_registration_channel(
                 if downsampled.size > 0:
                     variance = np.var(downsampled.astype(np.float32))
                     
-                    if ch not in channel_variances:
-                        channel_variances[ch] = []
-                    channel_variances[ch].append(variance)
+                    if desc.index not in channel_variances:
+                        channel_variances[desc.index] = []
+                    channel_variances[desc.index].append(variance)
         
         except Exception as e:
-            logger.warning(f"Failed to check channels for FOV {fov}: {e}")
+            logger.warning(f"Failed to check channels for FOV {region}_{fov}: {e}")
             continue
     
     if not channel_variances:
         logger.warning("Could not compute channel variances - using default channel 0")
         return 0
     
-    # Compute mean variance per channel
+    # Compute mean variance per channel and select best
     channel_mean_variance = {ch: np.mean(vars) for ch, vars in channel_variances.items()}
     best_channel = max(channel_mean_variance.items(), key=lambda x: x[1])[0]
     
-    # Format channel names for display
-    def format_channel_name(ch_idx: int) -> str:
-        """Format channel name with wavelength if available."""
-        if channel_names and ch_idx < len(channel_names):
-            return f"{channel_names[ch_idx]}"
-        return f"Channel {ch_idx}"
-    
-    logger.warning(f"Channel variance analysis (mean across {len(sample_fovs)} FOVs):")
+    # Log results
+    logger.warning(f"Channel variance analysis (mean across {len(sample_pairs)} FOVs):")
     for ch in sorted(channel_mean_variance.keys()):
         status = " ← SELECTED" if ch == best_channel else ""
-        ch_name = format_channel_name(ch)
+        ch_name = all_channel_names[ch] if all_channel_names and ch < len(all_channel_names) else f"Channel {ch}"
         logger.warning(f"  {ch_name}: variance={channel_mean_variance[ch]:.2e}{status}")
     
     return best_channel
 
 
-def is_edge_featureless(edge: np.ndarray, variance_threshold: float = 2e5) -> bool:
+def is_edge_featureless(edge: np.ndarray, variance_threshold: float = 1e3) -> bool:
     """Check if edge strip is featureless (dust speckles only, no tissue).
     
     Checks only the edge region being registered, not the full tile.
@@ -503,7 +502,7 @@ def is_edge_featureless(edge: np.ndarray, variance_threshold: float = 2e5) -> bo
     
     Args:
         edge: 2D edge strip array (e.g., 2048x195)
-        variance_threshold: Variance threshold (default 2e5 for uint16 edges)
+        variance_threshold: Variance threshold (default 1e3 - lowered to accept more edges)
         
     Returns:
         True if featureless (skip registration), False otherwise
@@ -845,8 +844,11 @@ def register_tiles_batched(
             f"neighbor relationships. Check that tiles have proper row/col assignments."
         )
     
-    # Auto-select best registration channel if default channel 0 has low variance
-    if registration_channel == 0:
+    # Auto-select best registration channel for OME-TIFF (channels inside file)
+    # For individual files, channel selection happens upstream before this function
+    is_ome_tiff = any(p.name.lower().endswith(('.ome.tif', '.ome.tiff')) for p in selected_tiff_paths)
+    
+    if registration_channel == 0 and is_ome_tiff:
         best_channel = select_best_registration_channel(
             selected_tiff_paths, 
             region_coords,
@@ -855,7 +857,7 @@ def register_tiles_batched(
             fov_to_z_level=fov_to_z_level
         )
         if best_channel != 0:
-            logger.warning(f"Auto-selected channel {best_channel} for registration (default channel 0 has low variance)")
+            logger.warning(f"Auto-selected channel {best_channel} for registration")
             registration_channel = best_channel
     
     # Load first image once for both memory estimation and flatfield validation
@@ -1265,12 +1267,68 @@ def register_tiles(
         if path.is_dir():
             if channel_pattern is None:
                 channel_pattern = select_channel_pattern(path)
-            image_paths = sorted(path.glob(channel_pattern))
+            all_image_paths = sorted(path.glob(channel_pattern))
         else:
-            image_paths = [path]
+            all_image_paths = [path]
+        
+        # Auto-select best channel if registration_channel is default (0)
+        if registration_channel == 0 and len(all_image_paths) > 0:
+            # Check format to determine if channel selection is needed
+            is_ome_tiff = any(p.name.lower().endswith(('.ome.tif', '.ome.tiff')) for p in all_image_paths)
+            
+            if not is_ome_tiff:
+                # Individual files: Need to filter to best channel
+                from ..image_loaders import ChannelSource
+                
+                # Try to select best channel
+                try:
+                    best_channel = select_best_registration_channel(
+                        all_image_paths,
+                        coords_df,
+                        edge_width=edge_width,
+                        num_sample_fovs=3,
+                        fov_to_z_level=None
+                    )
+                    
+                    # Get sample FOV to discover channels
+                    sample_fov_info = parse_filename_fov_info(all_image_paths[0].name)
+                    if sample_fov_info:
+                        region = sample_fov_info.get('region', 'Unknown')
+                        fov = sample_fov_info['fov']
+                        z_level = sample_fov_info.get('z_level')
+                        
+                        # Discover channels
+                        descriptors = ChannelSource.discover(
+                            files=all_image_paths,
+                            region=region,
+                            fov=fov,
+                            z_level=z_level
+                        )
+                        
+                        if descriptors and best_channel < len(descriptors):
+                            # Get the channel name for the selected channel
+                            selected_channel_name = descriptors[best_channel].name
+                            
+                            # Filter files to only those matching the selected channel
+                            filtered_paths = []
+                            for p in all_image_paths:
+                                channel_name = ChannelSource._extract_channel_name(p.name)
+                                if channel_name == selected_channel_name:
+                                    filtered_paths.append(p)
+                            
+                            if filtered_paths:
+                                all_image_paths = filtered_paths
+                                logger.info(f"Filtered to {len(all_image_paths)} files for channel '{selected_channel_name}'")
+                                # Individual files use channel 0
+                                registration_channel = 0
+                except Exception as e:
+                    logger.warning(f"Channel selection failed: {e}. Using all files.")
+            else:
+                # OME-TIFF: Channel selection happens inside register_tiles_batched
+                pass
         
         return register_tiles_batched(
-            selected_tiff_paths=image_paths,
+            selected_tiff_paths=all_image_paths,
             region_coords=coords_df,
             edge_width=edge_width,
             overlap_diff_threshold=overlap_diff_threshold,
@@ -2355,9 +2413,11 @@ def detect_channels(directory: Union[str, Path]) -> Dict[str, List[Path]]:
     return channels
 
 def select_channel_pattern(directory: Union[str, Path]) -> str:
-    """Automatically select an appropriate channel pattern.
+    """Select file pattern based on image format (not channel-specific).
     
-    Checks both the given directory and parent's ome_tiff/ subdirectory.
+    Returns a glob pattern that matches the image format in the directory.
+    Channel selection happens downstream via variance analysis in 
+    select_best_registration_channel().
     
     Parameters
     ----------
@@ -2367,7 +2427,7 @@ def select_channel_pattern(directory: Union[str, Path]) -> str:
     Returns
     -------
     str
-        Glob pattern for the selected channel
+        Glob pattern like "*.ome.tiff", "*.tiff", etc. (format-only, not channel-specific)
     """
     directory = Path(directory)
     
@@ -2375,87 +2435,35 @@ def select_channel_pattern(directory: Union[str, Path]) -> str:
     parent_ome_dir = directory.parent / "ome_tiff"
     if parent_ome_dir.exists() and parent_ome_dir.is_dir():
         search_dir = parent_ome_dir
-        logger.info(f"Detected ome_tiff/ directory, using {search_dir} for channel detection")
+        logger.info(f"Detected ome_tiff/ directory, using {search_dir} for file detection")
     else:
         search_dir = directory
     
-    channels = detect_channels(directory)
-    
-    # Check if we have OME-TIFF with internal channels
-    if channels.get("ome_tiff_channels"):
-        # For OME-TIFF, we have multiple channels in the same file
-        # Select the best channel for registration (prefer fluorescence)
-        if channels["fluorescence"]:
-            # Get the first fluorescence channel (tuple format: file, idx, name)
-            file_path, channel_idx, channel_name = channels["fluorescence"][0]
-            logger.info(f"OME-TIFF: Selected channel '{channel_name}' (index {channel_idx}) out of {len(channels['ome_tiff_channels'])} total channels")
-            # Return the OME-TIFF file pattern
-            if file_path.name.lower().endswith('.ome.tiff'):
-                return "*.ome.tiff"
-            else:
-                return "*.ome.tif"
-        elif channels["brightfield"]:
-            file_path, channel_idx, channel_name = channels["brightfield"][0]
-            logger.info(f"OME-TIFF: Selected channel '{channel_name}' (index {channel_idx}) out of {len(channels['ome_tiff_channels'])} total channels")
-            if file_path.name.lower().endswith('.ome.tiff'):
-                return "*.ome.tiff"
-            else:
-                return "*.ome.tif"
-    
-    # Regular TIFF files with channels in separate files
-    # Prefer fluorescence channels if available
-    if channels["fluorescence"]:
-        # Group fluorescence files by wavelength
-        wavelengths = {}
-        for file in channels["fluorescence"]:
-            # For regular TIFF, file is a Path object
-            if isinstance(file, tuple):
-                continue  # Skip OME-TIFF tuples (already handled above)
-            match = re.search(r"(\d+)_nm_Ex\.tiff$", file.name)
-            if match:
-                wavelength = int(match.group(1))
-                if wavelength not in wavelengths:
-                    wavelengths[wavelength] = []
-                wavelengths[wavelength].append(file)
-        
-        if wavelengths:
-            # Select the shortest wavelength (typically best for registration)
-            wavelength = min(wavelengths.keys())
-            pattern = f"*{wavelength}_nm_Ex.tiff"
-            print(f"Selected fluorescence channel: {pattern}")
-            return pattern
-        
-        # If no wavelength pattern found, use the first fluorescence file pattern
-        if channels["fluorescence"] and not isinstance(channels["fluorescence"][0], tuple):
-            example_file = channels["fluorescence"][0].name
-            pattern = f"*{example_file.split('_Fluorescence_')[-1]}"
-            print(f"Selected fluorescence channel: {pattern}")
-            return pattern
-    
-    # Fall back to brightfield if available
-    if channels["brightfield"]:
-        if not isinstance(channels["brightfield"][0], tuple):
-            example_file = channels["brightfield"][0].name
-            if len(channels["brightfield"]) > 1:
-                print("Warning: Multiple brightfield files found, using first one as pattern")
-            pattern = f"*{example_file.split('_BF_')[-1]}"
-            print(f"Selected brightfield channel: {pattern}")
-            return pattern
-    
-    # If no specific patterns found, check for OME-TIFF files first, then regular TIFF
-    # Check for OME-TIFF files (.ome.tif or .ome.tiff)
-    ome_tiff_files = [f for f in search_dir.iterdir() if f.suffix.lower() in ('.tif', '.tiff') and '.ome.' in f.name.lower()]
+    # Check for OME-TIFF files first (most specific format)
+    ome_tiff_files = list(search_dir.glob("*.ome.tiff")) + list(search_dir.glob("*.ome.tif"))
     if ome_tiff_files:
         # Check which extension is actually used (.tif vs .tiff)
         example_file = ome_tiff_files[0].name
         if example_file.lower().endswith('.ome.tiff'):
-            print("Info: Detected OME-TIFF files, using *.ome.tiff pattern")
+            logger.info("Detected OME-TIFF format with .ome.tiff extension")
             return "*.ome.tiff"
         else:
-            print("Info: Detected OME-TIFF files, using *.ome.tif pattern")
+            logger.info("Detected OME-TIFF format with .ome.tif extension")
             return "*.ome.tif"
     
-    print("Warning: No specific channel pattern detected, using all TIFF files")
+    # Check for regular TIFF files
+    tiff_files = list(search_dir.glob("*.tiff"))
+    tif_files = list(search_dir.glob("*.tif"))
+    
+    if tiff_files:
+        logger.info("Detected regular TIFF format with .tiff extension")
+        return "*.tiff"
+    elif tif_files:
+        logger.info("Detected regular TIFF format with .tif extension")
+        return "*.tif"
+    
+    # Default fallback
+    logger.warning("No TIFF files found, defaulting to *.tiff pattern")
     return "*.tiff"
 
 
@@ -2715,6 +2723,53 @@ def register_and_update_coordinates(
         if not region_paths:
             print(f"No images found for region {region}, skipping")
             continue
+        
+        # Auto-select best channel for individual files (BEFORE z-slice filtering)
+        is_ome_tiff = any(p.name.lower().endswith(('.ome.tif', '.ome.tiff')) for p in region_paths)
+        
+        if not is_ome_tiff and len(region_paths) > 0:
+            # Individual files: Need to filter to best channel
+            from ..image_loaders import ChannelSource
+            
+            try:
+                best_channel = select_best_registration_channel(
+                    region_paths,
+                    region_coords,
+                    edge_width=edge_width,
+                    num_sample_fovs=3,
+                    fov_to_z_level=None
+                )
+                
+                # Get sample FOV to discover channels
+                sample_fov_info = parse_filename_fov_info(region_paths[0].name)
+                if sample_fov_info:
+                    fov = sample_fov_info['fov']
+                    z_level = sample_fov_info.get('z_level')
+                    
+                    # Discover channels
+                    descriptors = ChannelSource.discover(
+                        files=region_paths,
+                        region=region,
+                        fov=fov,
+                        z_level=z_level
+                    )
+                    
+                    if descriptors and best_channel < len(descriptors):
+                        # Get the channel name for the selected channel
+                        selected_channel_name = descriptors[best_channel].name
+                        
+                        # Filter files to only those matching the selected channel
+                        filtered_paths = []
+                        for p in region_paths:
+                            channel_name = ChannelSource._extract_channel_name(p.name)
+                            if channel_name == selected_channel_name:
+                                filtered_paths.append(p)
+                        
+                        if filtered_paths:
+                            region_paths = filtered_paths
+                            logger.info(f"Region {region}: Filtered to {len(region_paths)} files for channel '{selected_channel_name}'")
+            except Exception as e:
+                logger.warning(f"Channel selection failed for region {region}: {e}. Using all files.")
         
         # Apply z-slice filtering to region-specific files
         if z_slice_for_registration is not None:

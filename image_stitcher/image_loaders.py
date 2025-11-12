@@ -20,10 +20,60 @@ Key functions:
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 import re
+import logging
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+def _read_tiff_with_fallback(filepath: Path) -> np.ndarray:
+    """Read TIFF file with tifffile, falling back to PIL if unavailable.
+    
+    Args:
+        filepath: Path to TIFF file
+        
+    Returns:
+        Numpy array of image data
+    """
+    try:
+        import tifffile
+        return tifffile.imread(filepath)
+    except ImportError:
+        from PIL import Image
+        with Image.open(filepath) as img:
+            return np.array(img)
+
+
+def _get_tiff_metadata(filepath: Path) -> Dict:
+    """Get basic TIFF metadata with tifffile, falling back to PIL if unavailable.
+    
+    Args:
+        filepath: Path to TIFF file
+        
+    Returns:
+        Dictionary with 'shape' and 'dtype' keys
+    """
+    try:
+        import tifffile
+        with tifffile.TiffFile(filepath) as tif:
+            page = tif.pages[0]
+            return {
+                'shape': page.shape,
+                'dtype': page.dtype,
+                'num_pages': len(tif.pages)
+            }
+    except ImportError:
+        from PIL import Image
+        with Image.open(filepath) as img:
+            arr = np.array(img)
+            return {
+                'shape': arr.shape,
+                'dtype': arr.dtype,
+                'num_pages': getattr(img, 'n_frames', 1)
+            }
 
 
 class ImageLoader(ABC):
@@ -95,29 +145,14 @@ class IndividualFileLoader(ImageLoader):
     def metadata(self) -> Dict:
         """Get metadata from individual file."""
         if self._metadata is None:
-            try:
-                import tifffile
-                with tifffile.TiffFile(self.filepath) as tif:
-                    page = tif.pages[0]
-                    self._metadata = {
-                        'num_channels': 1,  # Individual files are single channel
-                        'num_z': 1,         # Individual files are single Z-slice
-                        'shape': page.shape,
-                        'dtype': page.dtype,
-                        'channel_names': None
-                    }
-            except ImportError:
-                # Fallback to PIL if tifffile not available
-                from PIL import Image
-                with Image.open(self.filepath) as img:
-                    arr = np.array(img)
-                    self._metadata = {
-                        'num_channels': 1,
-                        'num_z': 1,
-                        'shape': arr.shape,
-                        'dtype': arr.dtype,
-                        'channel_names': None
-                    }
+            meta = _get_tiff_metadata(self.filepath)
+            self._metadata = {
+                'num_channels': 1,  # Individual files are single channel
+                'num_z': 1,         # Individual files are single Z-slice
+                'shape': meta['shape'],
+                'dtype': meta['dtype'],
+                'channel_names': None
+            }
         return self._metadata
     
     def read_slice(self, channel: int = 0, z: int = 0) -> np.ndarray:
@@ -127,14 +162,7 @@ class IndividualFileLoader(ImageLoader):
                 f"Individual file loader only supports channel=0, z=0. "
                 f"Got channel={channel}, z={z}"
             )
-        
-        try:
-            import tifffile
-            return tifffile.imread(self.filepath)
-        except ImportError:
-            from PIL import Image
-            with Image.open(self.filepath) as img:
-                return np.array(img)
+        return _read_tiff_with_fallback(self.filepath)
 
 
 class MultiPageTiffLoader(ImageLoader):
@@ -148,27 +176,14 @@ class MultiPageTiffLoader(ImageLoader):
     def metadata(self) -> Dict:
         """Get metadata from multi-page TIFF."""
         if self._metadata is None:
-            try:
-                import tifffile
-                with tifffile.TiffFile(self.filepath) as tif:
-                    self._metadata = {
-                        'num_channels': 1,  # Multi-page TIFFs are single channel
-                        'num_z': len(tif.pages),
-                        'shape': tif.pages[0].shape,
-                        'dtype': tif.pages[0].dtype,
-                        'channel_names': None
-                    }
-            except ImportError:
-                from PIL import Image
-                with Image.open(self.filepath) as img:
-                    arr = np.array(img)
-                    self._metadata = {
-                        'num_channels': 1,
-                        'num_z': img.n_frames,
-                        'shape': arr.shape,
-                        'dtype': arr.dtype,
-                        'channel_names': None
-                    }
+            meta = _get_tiff_metadata(self.filepath)
+            self._metadata = {
+                'num_channels': 1,  # Multi-page TIFFs are single channel
+                'num_z': meta['num_pages'],
+                'shape': meta['shape'],
+                'dtype': meta['dtype'],
+                'channel_names': None
+            }
         return self._metadata
     
     def read_slice(self, channel: int = 0, z: int = 0) -> np.ndarray:
@@ -330,6 +345,190 @@ class OMETiffLoader(ImageLoader):
         except Exception:
             # If parsing fails, return None
             return None
+
+
+# ============================================================================
+# Channel Discovery Abstraction
+# ============================================================================
+
+from dataclasses import dataclass
+
+
+@dataclass
+class ChannelDescriptor:
+    """Describes a loadable channel, format-agnostic.
+    
+    This abstraction allows uniform channel handling whether channels come from:
+    - OME-TIFF (multiple channels in one file)
+    - Individual files (one file per channel)
+    - Multi-page TIFF (single channel, multiple Z)
+    """
+    index: int                      # Selection index for GUI/registration (0-based)
+    name: str                       # Display name (e.g., "488nm", "DAPI", "Channel 0")
+    wavelength_nm: Optional[int]    # Parsed wavelength if available
+    loader: ImageLoader             # Loader instance for this channel
+    channel_param: int              # Which channel to pass to loader.read_slice()
+    z_param: int                    # Which z to pass to loader.read_slice()
+    
+    @property
+    def is_fluorescence(self) -> bool:
+        """Heuristic: is this likely a fluorescence channel?"""
+        if self.wavelength_nm is not None:
+            return True
+        name_upper = self.name.upper()
+        fluor_markers = ['GFP', 'RFP', 'DAPI', 'CY3', 'CY5', 'FITC', 'TRITC', 'HOECHST']
+        return any(marker in name_upper for marker in fluor_markers)
+    
+    @property
+    def is_brightfield(self) -> bool:
+        """Heuristic: is this likely a brightfield channel?"""
+        name_upper = self.name.upper()
+        return 'BF' in name_upper or 'BRIGHTFIELD' in name_upper or 'BRIGHT_FIELD' in name_upper
+
+
+class ChannelSource:
+    """Discovers and provides access to channels for a FOV."""
+    
+    @staticmethod
+    def _parse_wavelength_from_string(s: str) -> Optional[int]:
+        """Extract wavelength in nm from string.
+        
+        Handles: '488nm', '561_nm', '405 nm', 'Channel_488nm'
+        """
+        match = re.search(r'(\d{3,4})\s*_?nm', s.lower())
+        if match:
+            return int(match.group(1))
+        return None
+    
+    @staticmethod
+    def _extract_channel_name(filename: str, fallback_index: int = 0) -> str:
+        """Extract human-readable channel name from filename.
+        
+        Returns wavelength, dye name, or generic fallback.
+        """
+        filename_lower = filename.lower()
+        
+        # Wavelength patterns
+        match = re.search(r'(\d{3,4})\s*_?nm', filename_lower)
+        if match:
+            return f"{match.group(1)}nm"
+        
+        # RGB channels
+        match = re.search(r'_([RGB])\.tiff?$', filename, re.IGNORECASE)
+        if match:
+            return f"RGB_{match.group(1).upper()}"
+        
+        # Named fluorophores
+        fluor_map = {
+            'dapi': 'DAPI', 'hoechst': 'Hoechst',
+            'gfp': 'GFP', 'fitc': 'FITC',
+            'rfp': 'RFP', 'tritc': 'TRITC',
+            'cy3': 'Cy3', 'cy5': 'Cy5',
+        }
+        for marker, name in fluor_map.items():
+            if marker in filename_lower:
+                return name
+        
+        # Brightfield
+        if 'brightfield' in filename_lower or 'bright_field' in filename_lower:
+            return 'BF'
+        if re.search(r'\bbf\b', filename_lower):
+            return 'BF'
+        
+        return f"Channel {fallback_index}"
+    
+    @staticmethod
+    def discover(files: List[Path], region: str, fov: int, z_level: Optional[int] = None) -> List[ChannelDescriptor]:
+        """Discover all channels for a specific FOV.
+        
+        Args:
+            files: List of all image files
+            region: Region identifier
+            fov: FOV number
+            z_level: Optional z-level (for OME-TIFF or individual files with z)
+            
+        Returns:
+            List of ChannelDescriptor objects
+        """
+        from .registration.tile_registration import parse_filename_fov_info
+        
+        # Find files matching this FOV
+        matching_files = []
+        for path in files:
+            fov_info = parse_filename_fov_info(path.name)
+            if not fov_info:
+                continue
+            if fov_info.get('region') == region and fov_info.get('fov') == fov:
+                matching_files.append((path, fov_info))
+        
+        if not matching_files:
+            return []
+        
+        # Detect format
+        first_path = matching_files[0][0]
+        is_ome_tiff = first_path.name.lower().endswith(('.ome.tif', '.ome.tiff'))
+        
+        if is_ome_tiff:
+            # OME-TIFF: One file, multiple channels inside
+            loader = OMETiffLoader(first_path)
+            meta = loader.metadata
+            num_channels = meta['num_channels']
+            channel_names = meta.get('channel_names') or []
+            
+            # Determine z index
+            z_idx = z_level if z_level is not None else (meta['num_z'] // 2 if meta['num_z'] > 1 else 0)
+            
+            descriptors = []
+            for ch_idx in range(num_channels):
+                name = channel_names[ch_idx] if ch_idx < len(channel_names) else f"Channel {ch_idx}"
+                wavelength = ChannelSource._parse_wavelength_from_string(name)
+                
+                descriptors.append(ChannelDescriptor(
+                    index=ch_idx,
+                    name=name,
+                    wavelength_nm=wavelength,
+                    loader=loader,
+                    channel_param=ch_idx,
+                    z_param=z_idx
+                ))
+            
+            return descriptors
+        
+        else:
+            # Individual files: Each file is a channel
+            # Filter by z_level if specified
+            channel_files = {}
+            for path, fov_info in matching_files:
+                file_z = fov_info.get('z_level')
+                if z_level is not None and file_z != z_level:
+                    continue
+                
+                # Extract channel name from filename
+                ch_name = ChannelSource._extract_channel_name(path.name)
+                channel_files[ch_name] = path
+            
+            if not channel_files:
+                return []
+            
+            # Sort for consistent ordering
+            sorted_channel_names = sorted(channel_files.keys())
+            
+            descriptors = []
+            for idx, ch_name in enumerate(sorted_channel_names):
+                filepath = channel_files[ch_name]
+                loader = IndividualFileLoader(filepath)
+                wavelength = ChannelSource._parse_wavelength_from_string(ch_name)
+                
+                descriptors.append(ChannelDescriptor(
+                    index=idx,
+                    name=ch_name,
+                    wavelength_nm=wavelength,
+                    loader=loader,
+                    channel_param=0,  # Individual files are single-channel
+                    z_param=0         # Individual files are single Z-slice
+                ))
+            
+            return descriptors
 
 
 def parse_ome_tiff_filename(filename: str) -> Optional[Dict[str, any]]:
