@@ -119,12 +119,13 @@ class DragDropArea(QLabel):
 
 
 class StitcherThread(QThread):
-    def __init__(self, params: StitchingParameters, perform_registration: bool, image_directory: str, tensor_backend_engine: str | None = None) -> None:
+    def __init__(self, params: StitchingParameters, perform_registration: bool, image_directory: str, tensor_backend_engine: str | None = None, register_once: bool = True) -> None:
         super().__init__()
         self.params = params
         self.perform_registration = perform_registration
         self.image_directory = image_directory
         self.tensor_backend_engine = tensor_backend_engine
+        self.register_once = register_once
         self.registration_complete = False
         self.registration_error = None
         self.flatfield_corrections: dict[int, np.ndarray] | None = None
@@ -149,7 +150,8 @@ class StitcherThread(QThread):
                     ncc_threshold=0.5,           
                     edge_width=195,
                     tensor_backend_engine=self.tensor_backend_engine,
-                    flatfield_corrections=self.flatfield_corrections
+                    flatfield_corrections=self.flatfield_corrections,
+                    register_once=self.register_once
                 )
                 logging.info("Registration completed successfully")
                 self.registration_complete = True
@@ -182,7 +184,8 @@ class RegistrationThread(QThread):
         output_csv_path: str | None, 
         tensor_backend_engine: str | None = None,
         flatfield_corrections: dict[int, np.ndarray] | None = None,
-        flatfield_manifest: pathlib.Path | None = None
+        flatfield_manifest: pathlib.Path | None = None,
+        register_once: bool = True
     ) -> None:
         super().__init__()
         self.image_directory = image_directory
@@ -191,6 +194,7 @@ class RegistrationThread(QThread):
         self.tensor_backend_engine = tensor_backend_engine
         self.flatfield_corrections = flatfield_corrections
         self.flatfield_manifest = flatfield_manifest
+        self.register_once = register_once
 
     def run(self) -> None:
         try:
@@ -202,7 +206,8 @@ class RegistrationThread(QThread):
                 ncc_threshold=0.5,           
                 edge_width=195,
                 tensor_backend_engine=self.tensor_backend_engine,
-                flatfield_corrections=self.flatfield_corrections
+                flatfield_corrections=self.flatfield_corrections,
+                register_once=self.register_once
             )
             
             # Emit success signal with number of processed timepoints
@@ -293,7 +298,18 @@ class StitchingGUI(QWidget):
         self.mainLayout.addWidget(self.runRegistrationLabel, row, 0)
         self.runRegistrationCheckbox = QCheckBox(self)
         self.runRegistrationCheckbox.setChecked(False)  # Default: unchecked
+        self.runRegistrationCheckbox.stateChanged.connect(self.onRegistrationCheckboxChanged)
         self.mainLayout.addWidget(self.runRegistrationCheckbox, row, 1)
+        row += 1
+
+        # Register once checkbox - only visible when registration is enabled
+        self.registerOnceLabel = QLabel("Register Once (use first timepoint):", self)
+        self.mainLayout.addWidget(self.registerOnceLabel, row, 0)
+        self.registerOnceCheckbox = QCheckBox(self)
+        self.registerOnceCheckbox.setChecked(True)  # Default: checked
+        self.registerOnceCheckbox.setVisible(False)
+        self.mainLayout.addWidget(self.registerOnceCheckbox, row, 1)
+        self.registerOnceLabel.setVisible(False)
         row += 1
 
         # Output format section
@@ -676,6 +692,7 @@ class StitchingGUI(QWidget):
             
             # Get selected backend if registration is requested
             tensor_backend_engine = None
+            register_once = self.registerOnceCheckbox.isChecked()
             if perform_registration:
                 tensor_backend_engine = self._get_selected_tensor_backend()
             
@@ -683,7 +700,8 @@ class StitchingGUI(QWidget):
                 params=params,
                 perform_registration=perform_registration,
                 image_directory=self.inputDirectory,
-                tensor_backend_engine=tensor_backend_engine
+                tensor_backend_engine=tensor_backend_engine,
+                register_once=register_once
             )
             
             # Pass flatfield corrections to the stitcher thread for registration
@@ -832,6 +850,12 @@ class StitchingGUI(QWidget):
                     background-color: #f0f0f0;
                 }
             """)
+
+    def onRegistrationCheckboxChanged(self, state: int) -> None:
+        """Handle registration checkbox state changes."""
+        is_checked = (state == Qt.Checked)
+        self.registerOnceLabel.setVisible(is_checked)
+        self.registerOnceCheckbox.setVisible(is_checked)
 
     def onZLayerModeChanged(self, idx: int) -> None:
         """Handle z-layer mode selection changes."""
