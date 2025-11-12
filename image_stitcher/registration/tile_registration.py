@@ -2914,7 +2914,8 @@ def process_multiple_timepoints(
     ncc_threshold: float = 0.5,
     edge_width: int = DEFAULT_EDGE_WIDTH,
     tensor_backend_engine: Optional[str] = None,
-    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None
+    flatfield_corrections: Optional[Dict[int, np.ndarray]] = None,
+    register_once: bool = True
 ) -> Dict[int, pd.DataFrame]:
     """[DEPRECATED] Use register_tiles(mode=RegistrationMode.MULTI_TIMEPOINT) instead.
     
@@ -2936,8 +2937,9 @@ def process_multiple_timepoints(
         Preferred tensor backend engine ('cupy', 'torch', 'numpy', None for auto)
     flatfield_corrections : Optional[Dict[int, np.ndarray]]
         Precomputed flatfield corrections indexed by channel
-    flatfield_manifest : Optional[Path]
-        Path to flatfield manifest file to load corrections
+    register_once : bool
+        If True, compute registration for first timepoint only and apply to all.
+        If False, compute registration independently for each timepoint.
         
     Returns
     -------
@@ -2961,7 +2963,9 @@ def process_multiple_timepoints(
     
     # Process each timepoint
     results = {}
-    for tp_dir in timepoint_dirs:
+    first_timepoint_deltas = None
+    
+    for i, tp_dir in enumerate(timepoint_dirs):
         timepoint = int(tp_dir.name)
         print(f"\nProcessing timepoint {timepoint}")
         
@@ -2980,21 +2984,40 @@ def process_multiple_timepoints(
             shutil.copy2(coords_csv, backup_path)
             
         try:
-            # Process this timepoint
-            updated_coords = register_and_update_coordinates(
-                image_directory=base_directory,  # Use base directory instead of timepoint directory
-                csv_path=coords_csv,
-                output_csv_path=coords_csv,  # Overwrite the original
-                channel_pattern=None,  # Auto-detect
-                overlap_diff_threshold=overlap_diff_threshold,
-                pou=pou,
-                ncc_threshold=ncc_threshold,
-                skip_backup=True,  # Skip backup since we already made one
-                z_slice_for_registration=0,
-                edge_width=edge_width,
-                tensor_backend_engine=tensor_backend_engine,
-                flatfield_corrections=flatfield_corrections
-            )
+            # For first timepoint or when register_once=False, compute registration normally
+            if i == 0 or not register_once:
+                updated_coords = register_and_update_coordinates(
+                    image_directory=base_directory,  # Use base directory instead of timepoint directory
+                    csv_path=coords_csv,
+                    output_csv_path=coords_csv,  # Overwrite the original
+                    channel_pattern=None,  # Auto-detect
+                    overlap_diff_threshold=overlap_diff_threshold,
+                    pou=pou,
+                    ncc_threshold=ncc_threshold,
+                    skip_backup=True,  # Skip backup since we already made one
+                    z_slice_for_registration=0,
+                    edge_width=edge_width,
+                    tensor_backend_engine=tensor_backend_engine,
+                    flatfield_corrections=flatfield_corrections
+                )
+                
+                # Store deltas from first timepoint for later reuse
+                if i == 0 and register_once and len(timepoint_dirs) > 1:
+                    original_coords = pd.read_csv(backup_path)
+                    first_timepoint_deltas = {
+                        'dx': (updated_coords['x (mm)'] - original_coords['x (mm)']).values,
+                        'dy': (updated_coords['y (mm)'] - original_coords['y (mm)']).values
+                    }
+                    print(f"Stored registration deltas from first timepoint for reuse")
+            else:
+                # For subsequent timepoints when register_once=True, apply first timepoint's deltas
+                print(f"Applying registration from first timepoint (register_once mode)")
+                original_coords = pd.read_csv(backup_path)
+                updated_coords = original_coords.copy()
+                updated_coords['x (mm)'] = original_coords['x (mm)'] + first_timepoint_deltas['dx']
+                updated_coords['y (mm)'] = original_coords['y (mm)'] + first_timepoint_deltas['dy']
+                updated_coords.to_csv(coords_csv, index=False)
+                
             results[timepoint] = updated_coords
             print(f"Successfully processed timepoint {timepoint}")
         except Exception as e:
