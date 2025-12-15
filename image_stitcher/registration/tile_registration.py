@@ -3,21 +3,10 @@
 This module provides functionality for registering microscope image tiles and updating
 their stage coordinates without performing full image stitching. It includes:
 
-- Tile position extraction and validation
-- Row and column clustering of tiles
-- Translation computation between adjacent tiles
-- Global optimization of tile positions
-- Stage coordinate updates
-
 The module is designed to work with TIFF images and CSV coordinate files from
 microscope acquisition systems.
 
-KEY IMPROVEMENT: Neighborhood-aware batching ensures that tiles and their neighbors
-are always loaded in the same batch, eliminating cross-batch translation failures
-that occurred in previous implementations. This guarantees complete translation
-computation for all valid tile pairs.
-
-CRITICAL FIX: Fixed broken neighbor assignment that was converting NaN values to
+Fixed broken neighbor assignment that was converting NaN values to
 garbage integer indices, creating fake neighbor relationships between tiles that
 shouldn't be neighbors. Now properly preserves NaN for missing neighbors.
 
